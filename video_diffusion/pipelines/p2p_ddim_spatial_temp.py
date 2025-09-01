@@ -1,0 +1,518 @@
+from typing import Callable, List, Optional, Union
+import os, sys
+import PIL
+import time
+from accelerate import Accelerator
+import torch
+import torch.distributed as dist
+import grid
+import time
+import numpy as np
+from einops import rearrange
+from tqdm import trange, tqdm
+from transformers import CLIPTextModel, CLIPTokenizer
+from diffusers.utils import deprecate, logging
+from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
+from diffusers.models import AutoencoderKL
+from diffusers.schedulers import (
+    DDIMScheduler,
+    DPMSolverMultistepScheduler,
+    EulerAncestralDiscreteScheduler,
+    EulerDiscreteScheduler,
+    LMSDiscreteScheduler,
+    PNDMScheduler,
+)
+from ..models.unet_3d_condition import UNet3DConditionModel
+from .stable_diffusion import SpatiotempStableDiffusionPipeline
+from video_diffusion.prompt_attention import attention_util
+
+
+logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
+    def __init__(
+        self,
+        vae: AutoencoderKL,
+        text_encoder: CLIPTextModel,
+        tokenizer: CLIPTokenizer,
+        unet: UNet3DConditionModel,
+        scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler, EulerDiscreteScheduler, EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler,],
+        disk_store: bool=False,
+        video_length: int=8,
+        grid_sizeH: int=2,
+        grid_sizeW: int=2,
+        accelerator : Accelerator=None,
+        data_path : str="",
+        num_inference_steps : int=0
+        ):
+        super().__init__(vae, text_encoder, tokenizer, unet, scheduler)
+        self.store_controller = attention_util.AttentionStore(disk_store=disk_store,stage=0)
+        self.empty_controller = attention_util.EmptyControl()
+        self.grid_sizeH=grid_sizeH
+        self.grid_sizeW=grid_sizeW
+        self.accelerator=accelerator
+        self.video_length=video_length//torch.cuda.device_count()
+        device = accelerator.device
+        GPU_id=dist.get_rank()
+        self.num_inference_steps=num_inference_steps
+        self.attention_path = os.path.join('Attentions', str(GPU_id), os.path.basename(data_path),str(self.video_length))
+        self.latents_path = os.path.join('Latents', str(GPU_id), os.path.basename(data_path),str(self.video_length))
+        # 初始化分布式环境
+        
+    r"""
+    Pipeline for text-to-video generation using Spatio-temp Stable Diffusion.
+    """
+
+    def check_inputs(self, prompt, height, width, callback_steps, strength=None):
+        if not isinstance(prompt, str) and not isinstance(prompt, list):
+            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+        if strength is not None:
+            if strength <= 0 or strength > 1:
+                raise ValueError(f"The value of strength should in (0.0, 1.0] but is {strength}")
+
+        if height % 8 != 0 or width % 8 != 0:
+            raise ValueError(
+                f"`height` and `width` have to be divisible by 8 but are {height} and {width}."
+            )
+
+        if (callback_steps is None) or (
+            callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
+        ):
+            raise ValueError(
+                f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
+                f" {type(callback_steps)}."
+            )
+    
+    def encode_in_f_batches(self,image_grid, model):
+        batches = torch.split(image_grid,1, dim=0)  # 分批
+        encoded_batches = []
+        for batch in batches:
+            latent_dist = model(batch).latent_dist.sample()
+            encoded_batches.append(latent_dist)
+        latents_grid = torch.cat(encoded_batches, dim=0)
+        return latents_grid
+
+    @torch.no_grad()
+    def prepare_latents_ddim_inverted(self, image, batch_size,num_images_per_prompt, 
+                                        text_embeddings,
+                                        store_attention=False, prompt=None,
+                                        generator=None,
+                                        LOW_RESOURCE = True,
+                                        save_path = None,
+                                       
+                                      ):
+ 
+        self.prepare_before_train_loop()
+        if store_attention:
+            attention_util.register_attention_control(self, self.store_controller)
+        resource_default_value = self.store_controller.LOW_RESOURCE
+        self.store_controller.LOW_RESOURCE = LOW_RESOURCE  # in inversion, no CFG, record all latents attention
+        batch_size = batch_size * num_images_per_prompt
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
+        image=rearrange(image,"(b f) c h w -> b c f h w", b=1)#[1,3,8,512,512]
+        init_latents=grid.combine_frames_in_grid(image,self.grid_sizeH,self.grid_sizeW) 
+        init_latents=rearrange(init_latents,"b c f h w -> (b f) c h w")#[2, 3, 1024, 1024]
+        init_latents=self.encode_in_f_batches(init_latents,self.vae.encode)
+        init_latents = 0.18215 * init_latents
+        init_latents = torch.cat([init_latents], dim=0)
+        init_latents_bcfhw = rearrange(init_latents, "(b f) c h w -> b c f h w", b=batch_size)
+        os.makedirs(self.latents_path, exist_ok = True)
+        os.makedirs(self.attention_path, exist_ok = True)
+
+        ddim_latent = self.ddim_clean2noisy_loop(init_latents_bcfhw, text_embeddings, self.store_controller)
+        
+        if store_attention and (save_path is not None) :
+            attention_util.register_attention_control(self, self.empty_controller)
+        self.store_controller.LOW_RESOURCE = resource_default_value
+        return ddim_latent
+    
+
+    def process_with_unet(self,unet, latent_model_input, t, text_embeddings,b_indices):
+        latent_grids = latent_model_input.split(1, dim=2)
+        noise_preds = []
+        for i, latent_grid in enumerate(latent_grids):
+            noise_pred = unet(latent_grid, t, encoder_hidden_states=text_embeddings,indices=b_indices[i]).sample
+            noise_preds.append(noise_pred)
+        noise_pred = torch.cat(noise_preds, dim=2)
+        return noise_pred
+
+    @torch.no_grad()
+    def ddim_clean2noisy_loop(self, latent, text_embeddings, controller:attention_util.AttentionControl=None):
+        weight_dtype = latent.dtype
+        uncond_embeddings, cond_embeddings = text_embeddings.chunk(2)
+        latent = latent.clone().detach()
+        print('Invert clean image to noise latents by DDIM and Unet')
+        for i in trange(len(self.scheduler.timesteps)):
+            #print("latents cun","t=",i,"time",time_end-time_start)
+            t = self.scheduler.timesteps[len(self.scheduler.timesteps) - i - 1]
+            if not isinstance(t, torch.Tensor):
+                t = torch.tensor(t, device=latent.device)
+            t = t.long()
+            time_start=time.time()
+            torch.save(latent, os.path.join(
+                        self.latents_path, f'{i}.pt'))
+            time_end=time.time()
+            if torch.cuda.device_count()>1:
+                latent,indices= self.alternate_multiGPU(latent,i)
+            else:
+                latent,indices= self.alternate(latent,i)
+            b_indices=self.reassign_values(indices, self.grid_sizeH,self.grid_sizeW)
+            noise_pred=self.process_with_unet(self.unet,latent,t,cond_embeddings,b_indices)
+            latent = self.next_clean2noise_step(noise_pred, t, latent)
+           
+            if controller is not None: 
+                latent=grid.restore_frames_from_grid(latent,self.grid_sizeH,self.grid_sizeW)
+                sqs=torch.argsort(torch.tensor(indices))
+                latent=latent[:, :, sqs, :, :]
+                latent=grid.combine_frames_in_grid(latent,self.grid_sizeH,self.grid_sizeW)
+                latent = controller.step_callback(latent,0,self.attention_path)
+                latent=grid.restore_frames_from_grid(latent,self.grid_sizeH,self.grid_sizeW)
+                latent=latent[:, :, indices, :, :]
+                latent=grid.combine_frames_in_grid(latent,self.grid_sizeH,self.grid_sizeW)
+            latent = latent.to(weight_dtype)
+            torch.cuda.empty_cache()
+        
+            
+        return latent
+
+    
+    def next_clean2noise_step(self, model_output: Union[torch.FloatTensor, np.ndarray], timestep: int, sample: Union[torch.FloatTensor, np.ndarray]):
+        """
+        Assume the eta in DDIM=0
+        """
+        timestep, next_timestep = min(timestep - self.scheduler.config.num_train_timesteps // self.scheduler.num_inference_steps, 999), timestep
+        alpha_prod_t = self.scheduler.alphas_cumprod[timestep] if timestep >= 0 else self.scheduler.final_alpha_cumprod
+        alpha_prod_t_next = self.scheduler.alphas_cumprod[next_timestep]
+        beta_prod_t = 1 - alpha_prod_t
+        next_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
+        next_sample_direction = (1 - alpha_prod_t_next) ** 0.5 * model_output
+        next_sample = alpha_prod_t_next ** 0.5 * next_original_sample + next_sample_direction
+        return next_sample
+
+    
+    def get_timesteps(self, num_inference_steps, strength, device):
+        # get the original timestep using init_timestep
+        init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
+
+        t_start = max(num_inference_steps - init_timestep, 0)
+        timesteps = self.scheduler.timesteps[t_start:]
+
+        return timesteps, num_inference_steps - t_start
+    
+    def p2preplace_edit(self, **kwargs):
+        # Edit controller during inference
+        # The controller must know the source prompt for replace mapping
+        
+        len_source = {len(kwargs['source_prompt'].split(' '))}
+        len_target = {len(kwargs['prompt'].split(' '))}
+        equal_length = (len_source == len_target)
+        print(f" len_source: {len_source}, len_target: {len_target}, equal_length: {equal_length}")
+        edit_controller = attention_util.make_controller(
+                            self.tokenizer, 
+                            [ kwargs['source_prompt'], kwargs['prompt']],
+                            NUM_DDIM_STEPS = kwargs['num_inference_steps'],
+                            is_replace_controller=kwargs.get('is_replace_controller', True) and equal_length,
+                            cross_replace_steps=kwargs['cross_replace_steps'], 
+                            self_replace_steps=kwargs['self_replace_steps'], 
+                            blend_words=kwargs.get('blend_words', None),
+                            equilizer_params=kwargs.get('eq_params', None),
+                            additional_attention_store=self.store_controller,
+                            use_inversion_attention = kwargs['use_inversion_attention'],
+                            blend_self_th = kwargs.get('blend_self_th', (0.3, 0.3)),
+                            blend_latents_th = kwargs.get('blend_latents_th', (0.3, 0.3)),
+                            blend_self_attention = kwargs.get('blend_self_attention', None),
+                            blend_latents=kwargs.get('blend_latents', None),
+                            save_path=kwargs.get('save_path', None),
+                            save_self_attention = kwargs.get('save_self_attention', True),
+                            disk_store = kwargs.get('disk_store', False),
+                            attention_path=self.attention_path  # 传递参数
+                            )
+        
+        attention_util.register_attention_control(self, edit_controller)
+        
+
+        # In ddim inferece, no need source prompt
+        sdimage_output = self.sd_ddim_pipeline(
+            controller = edit_controller, 
+            # target_prompt = kwargs['prompts'][1],
+            **kwargs)
+        if hasattr(edit_controller.latent_blend, 'mask_list'):
+            mask_list = edit_controller.latent_blend.mask_list
+        else:
+            mask_list = None
+        if len(edit_controller.attention_store.keys()) > 0:
+            attention_output = None
+        else:
+            attention_output = None
+        dict_output = {
+                "sdimage_output" : sdimage_output,
+                "attention_output" : attention_output,
+                "mask_list" : mask_list,
+            }
+        attention_util.register_attention_control(self, self.empty_controller)
+        return dict_output
+    
+    def alternate(self,latents,flag):
+        org = list(range(self.video_length))
+        alt = org[self.grid_sizeH:] + org[:self.grid_sizeH]
+        if self.video_length==self.grid_sizeH*self.grid_sizeW:
+            indicate=org
+            sqc=org
+        elif flag%2==0 and self.video_length!=self.grid_sizeH*self.grid_sizeW:
+            indicate=alt
+            sqc=alt
+        else:
+            indicate = org
+            sqc=torch.argsort(torch.tensor(alt))
+        latents=grid.restore_frames_from_grid(latents,self.grid_sizeH,self.grid_sizeW)
+        latents=latents[:, :, sqc, :, :]
+        latents=grid.combine_frames_in_grid(latents,self.grid_sizeH,self.grid_sizeW)
+        return latents,indicate
+    def alternate_multiGPU(self, latents, flag):
+        org = list(range(self.video_length))
+        alt = org[self.grid_sizeH:] + org[:self.grid_sizeH]
+        rank = dist.get_rank()
+        device = latents.device  # 确保设备一致
+        
+        # if self.video_length == self.grid_sizeH *self.grid_sizeW:
+        #     indicate = org
+        #     sqc = org
+        if flag % 2 == 0:
+            # 偶数变
+            sqc = alt
+            if rank == 0:
+                indicate = org
+                latents = grid.restore_frames_from_grid(latents, self.grid_sizeH,self.grid_sizeW)
+                data = latents[:, :, :self.grid_sizeH, :, :].to(device)  # 确保设备一致
+                data1 = torch.zeros_like(data)
+                data = data.contiguous()  # 确保张量是连续的
+                latents = latents[:, :, self.grid_sizeH:, :, :]
+                dist.send(data, dst=1)  # Rank 0 发送数据到 Rank 1
+                dist.recv(data1, src=1)  # Rank 0 接收来自 Rank 1 的数据
+                latents = torch.cat([latents,data1], dim=2).to(device)
+                latents = grid.combine_frames_in_grid(latents, self.grid_sizeH,self.grid_sizeW)
+            elif rank == 1:
+                indicate = alt
+                latents = grid.restore_frames_from_grid(latents, self.grid_sizeH,self.grid_sizeW)
+                data = latents[:, :, :self.grid_sizeH, :, :].to(device)  # 确保设备一致
+                data1 = torch.zeros_like(data)
+                data = data.contiguous()  # 确保张量是连续的
+                latents = latents[:, :, self.grid_sizeH:, :, :]
+                dist.recv(data1, src=0)  # Rank 1 接收来自 Rank 0 的数据
+                dist.send(data, dst=0)  # Rank 1 发送数据到 Rank 0
+                latents = torch.cat([latents,data1], dim=2).to(device)
+                latents = grid.combine_frames_in_grid(latents, self.grid_sizeH,self.grid_sizeW)
+        else:
+            # 奇数不变
+            indicate = org
+            sqc = torch.argsort(torch.tensor(alt))
+            if rank == 0:
+                latents = grid.restore_frames_from_grid(latents, self.grid_sizeH,self.grid_sizeW)
+                data = latents[:, :, -self.grid_sizeH:, :, :].to(device)  # 确保设备一致
+                data1 = torch.zeros_like(data)
+                data = data.contiguous()  # 确保张量是连续的
+                latents = latents[:, :, :-self.grid_sizeH, :, :]
+                dist.send(data, dst=1)  # Rank 0 发送数据到 Rank 1
+                dist.recv(data1, src=1)  # Rank 0 接收来自 Rank 1 的数据
+                latents = torch.cat([data1,latents], dim=2).to(device)
+                latents = grid.combine_frames_in_grid(latents, self.grid_sizeH,self.grid_sizeW)
+            elif rank == 1:
+                latents = grid.restore_frames_from_grid(latents, self.grid_sizeH,self.grid_sizeW)
+                data = latents[:, :, -self.grid_sizeH:, :, :].to(device)  # 确保设备一致
+                data1 = torch.zeros_like(data)
+                data = data.contiguous()  # 确保张量是连续的
+                latents = latents[:, :, :-self.grid_sizeH, :, :]
+                dist.recv(data1, src=0)  # Rank 1 接收来自 Rank 0 的数据
+                dist.send(data, dst=0)  # Rank 1 发送数据到 Rank 0
+                latents = torch.cat([data1,latents], dim=2).to(device)
+                latents = grid.combine_frames_in_grid(latents, self.grid_sizeH,self.grid_sizeW)
+        dist.barrier()  # 同步所有进程
+        
+        return latents, indicate
+
+    @torch.no_grad()
+    def __call__(self, **kwargs):
+        edit_type = kwargs['edit_type']
+        assert edit_type in ['save', 'swap', None]
+        if edit_type is None:
+            return self.sd_ddim_pipeline(controller = None, **kwargs)
+        if edit_type == 'save':
+            sdimage_output = self.sd_ddim_pipeline(controller = None, **kwargs)
+            mask_list = None
+            attention_output=None
+            dict_output = {
+                "sdimage_output" : sdimage_output,
+                "attention_output"   : attention_output,
+                'mask_list':  mask_list
+            }
+            # Detach the controller for safety
+            attention_util.register_attention_control(self, self.empty_controller)
+            return dict_output
+        if edit_type == 'swap':
+            return self.p2preplace_edit(**kwargs)
+
+    @torch.no_grad()
+    def sd_ddim_pipeline(
+        self,
+        prompt: Union[str, List[str]],
+        image: Union[torch.FloatTensor, PIL.Image.Image] = None,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        strength: float = None,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 7.5,
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+        num_images_per_prompt: Optional[int] = 1,
+        eta: float = 0.0,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        latents: Optional[torch.FloatTensor] = None,
+        output_type: Optional[str] = "pil",
+        return_dict: bool = True,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_steps: Optional[int] = 1,
+        controller: attention_util.AttentionControl = None,
+        **args
+    ):
+        # 0. Default height and width to unet
+        height = height or self.unet.config.sample_size * self.vae_scale_factor
+        width = width or self.unet.config.sample_size * self.vae_scale_factor
+
+        # 1. Check inputs. Raise error if not correct
+        self.check_inputs(prompt, height, width, callback_steps, strength)
+
+        # 2. Define call parameters
+        batch_size = 1 if isinstance(prompt, str) else len(prompt)
+        device = self._execution_device
+        do_classifier_free_guidance = guidance_scale > 1.0
+
+        # 3. Encode input prompt
+        text_embeddings = self._encode_prompt(
+            prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt
+        )
+        
+        # 4. Prepare timesteps
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.scheduler.timesteps
+        
+
+        latents_dtype = latents.dtype
+
+        # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+
+        # 7. Denoising loop
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(tqdm(timesteps)):
+                if torch.cuda.device_count()>1:
+                    latents,indices= self.alternate_multiGPU(latents,i)
+                else:
+                    latents,indices= self.alternate(latents,i)
+                # expand the latents if we are doing classifier free guidance
+                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                b_indices=self.reassign_values(indices, self.grid_sizeH,self.grid_sizeW)
+                # predict the noise residual
+                latent_grids_in_unet = latent_model_input.split(1, dim=2)
+                latent_grid=latents.split(1, dim=2)
+                # 存储每个网格批次的处理结果
+                latents_b= []
+                # 逐批次处理每个单帧网格
+                for j, latent_grids_in_unet in enumerate(latent_grids_in_unet):
+                   
+                    noise_pred = self.unet(latent_grids_in_unet, t, encoder_hidden_states=text_embeddings, indices=b_indices[j]).sample.to(dtype=latents_dtype)
+                    
+                    if do_classifier_free_guidance:
+                       noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                       noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latent= self.scheduler.step(noise_pred, t, latent_grid[j], **extra_step_kwargs).prev_sample
+                    
+                    weight_type = latents.dtype
+                    latents_b.append(latent)
+                latents = torch.cat(latents_b, dim=2)
+                if controller is not None:
+                            latents=grid.restore_frames_from_grid(latents,self.grid_sizeH,self.grid_sizeW)
+                            sqs=torch.argsort(torch.tensor(indices))
+                            latents=latents[:, :, sqs, :, :]
+                            latents=grid.combine_frames_in_grid(latents,self.grid_sizeH,self.grid_sizeW)
+                            latents = controller.step_callback(latents,self.num_inference_steps-i-1,self.latents_path).to(device, dtype=weight_type)
+                            latents=grid.restore_frames_from_grid(latents,self.grid_sizeH,self.grid_sizeW)
+                            latents=latents[:, :, indices, :, :]
+                            latents=grid.combine_frames_in_grid(latents,self.grid_sizeH,self.grid_sizeW)
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        callback(i, t, latents)
+                torch.cuda.empty_cache()
+        # 8. Post-processing
+        latents = self.decode_in_f_batches(latents)
+        image = grid.restore_frames_from_grid(latents,self.grid_sizeH,self.grid_sizeW)
+        image = rearrange(image, "b c f h w -> b f h w c")
+        # 9. Run safety checker
+        has_nsfw_concept = None
+        image = (image / 2 + 0.5).clamp(0, 1)
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        image = image.cpu().float().numpy()
+        # 10. Convert to PIL
+        if output_type == "pil":
+            image = self.numpy_to_pil(image)
+        if not return_dict:
+            return (image, has_nsfw_concept)
+        torch.cuda.empty_cache()
+        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+    
+
+
+
+
+    def decode_in_f_batches(self, image_grid):  
+            batches = torch.split(image_grid, 1, dim=2)  # 分批
+            decoded_batches = []
+            for batch in batches:
+                latent_dist = self.decode_latents(batch,self.grid_sizeH,self.grid_sizeW)
+                decoded_batches.append(latent_dist)
+            latents_grid = torch.cat(decoded_batches, dim=2)
+            return latents_grid
+    
+    def reassign_values(self, indices, grid_sizeH,grid_sizeW):
+        result = []
+        sublist_size = (grid_sizeH*grid_sizeW)
+        # Step 1: Split the indices list into sublists
+        sublists = [indices[i:i + sublist_size] for i in range(0, len(indices), sublist_size)]
+        for sublist in sublists:
+            # Step 2: Sort the sublist and assign new values (0, 1, 2, ...)
+            sorted_sublist = sorted(sublist)
+            reassigned_sublist = [sorted_sublist.index(x) for x in sublist]
+            # Step 3: Add the new sublist to the result
+            result.append(reassigned_sublist)
+        return result
+
+    def print_pipeline(self, logger):
+        expected_modules, optional_parameters = self._get_signature_keys(self)        
+        components_details = {
+            k: getattr(self, k) for k in self.config.keys() if not k.startswith("_") and k not in optional_parameters
+        }
+        import json
+        # logger.info(str(json.dumps(components_details, indent = 4)))
+        # print(str(components_details))
+        # print(self._optional_components)
+        print(f"python version {sys.version}")
+        print(f"torch version {torch.__version__}")
+        print(f"validate gpu status:")
+        print( torch.tensor(1.0).cuda()*2)
+        os.system("nvcc --version")
+        import diffusers
+        print(diffusers.__version__)
+        print(diffusers.__file__)
+        try:
+            import bitsandbytes
+            print(bitsandbytes.__file__)
+        except:
+            print("fail to import bitsandbytes")
+        # os.system("accelerate env")
+        # os.system("python -m xformers.info")
