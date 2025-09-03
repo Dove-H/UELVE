@@ -152,6 +152,7 @@ class AttentionStore(AttentionControl):
         self.step_store = self.get_empty_store()
         self.attention_store = {}
         self.save_self_attention = save_self_attention
+       
         self.latents_store = []
         self.attention_store_all_step = []
         self.flag=0

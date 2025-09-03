@@ -43,18 +43,10 @@ class P2pSampleLogger:
         self.guidance_scale = guidance_scale
         self.num_inference_steps = num_inference_steps
         self.strength = strength
-
-        if sample_seeds is None:
-            max_num_samples_per_prompt = int(1e5)
-            if num_samples_per_prompt > max_num_samples_per_prompt:
-                raise ValueError
-            sample_seeds = torch.randint(0, max_num_samples_per_prompt, (num_samples_per_prompt,))
-            sample_seeds = sorted(sample_seeds.numpy().tolist())
         self.sample_seeds = sample_seeds
-
+        
         self.logdir = os.path.join(logdir, subdir)
         os.makedirs(self.logdir)
-
         self.annotate = annotate
         self.annotate_size = annotate_size
         self.make_grid = use_make_grid
@@ -77,84 +69,50 @@ class P2pSampleLogger:
         samples_all = []
         attention_all = []
         # handle input image
-        if image is not None:
-            input_pil_images = pipeline.numpy_to_pil(tensor_to_numpy(image))[0]
-            if self.annotate :
-                samples_all.append([
-                            annotate_image(image, "input sequence", font_size=self.annotate_size) for image in input_pil_images
-                        ])
-            else:
-                samples_all.append(input_pil_images)
+        input_pil_images = pipeline.numpy_to_pil(tensor_to_numpy(image))[0]
+        samples_all.append(input_pil_images)
         for idx, prompt in enumerate(tqdm(self.editing_prompts, desc="Generating sample images")):
-            if self.prompt2prompt_edit:
-                if self.traverse_p2p_config:
-                    p2p_config_now = copy.deepcopy(self.p2p_config[idx])
-                else:
-                    p2p_config_now = copy.deepcopy(self.p2p_config[idx])
-
-                if idx == 0 and not self.use_inversion_attention:
-                    edit_type = 'save'
-                    p2p_config_now.update({'save_self_attention': True})
-                    print('Reflash the attention map in pipeline')
-
-                else:
-                    edit_type = 'swap'
-                    p2p_config_now.update({'save_self_attention': False})
-
-                p2p_config_now.update({'use_inversion_attention': self.use_inversion_attention})
-            else:
-                edit_type = None
-
+            p2p_config_now = copy.deepcopy(self.p2p_config[idx])
+            edit_type = 'swap'
+            p2p_config_now.update({'save_self_attention': False})
+            p2p_config_now.update({'use_inversion_attention': self.use_inversion_attention})
             input_prompt = prompt
            
-            for seed in self.sample_seeds:
-                
-                generator = torch.Generator(device=device)
-                generator.manual_seed(seed)
-                sequence_return = pipeline(
-                    prompt=input_prompt,
-                    source_prompt = self.editing_prompts[0] if self.source_prompt is None else self.source_prompt,
-                    edit_type = edit_type,
-                    image=image, # torch.Size([8, 3, 512, 512])
-                    strength=self.strength,
-                    generator=generator,
-                    num_inference_steps=self.num_inference_steps,
-                    clip_length=self.clip_length,
-                    guidance_scale=self.guidance_scale,
-                    num_images_per_prompt=1,
-                    # used in null inversion
-                    latents = latents,
-                    uncond_embeddings_list = uncond_embeddings_list,
-                    save_path = save_dir,
-                    **p2p_config_now,
-                )
-                if self.prompt2prompt_edit:
-                    sequence = sequence_return['sdimage_output'].images[0]
-                    attention_output = sequence_return['attention_output']
-                    
-                else:
-                    sequence = sequence_return.images[0]
-                torch.cuda.empty_cache()
+            generator = torch.Generator(device=device)
+            generator.manual_seed(0)
+            sequence_return = pipeline(
+                prompt=input_prompt,
+                source_prompt = self.editing_prompts[0] if self.source_prompt is None else self.source_prompt,
+                edit_type = edit_type,
+                image=image, # torch.Size([8, 3, 512, 512])
+                strength=self.strength,
+                generator=generator,
+                num_inference_steps=self.num_inference_steps,
+                clip_length=self.clip_length,
+                guidance_scale=self.guidance_scale,
+                num_images_per_prompt=1,
+                # used in null inversion
+                latents = latents,
+                uncond_embeddings_list = uncond_embeddings_list,
+                save_path = save_dir,
+                **p2p_config_now,
+            )
+       
+            sequence = sequence_return['sdimage_output'].images[0]
+            attention_output = sequence_return['attention_output']
+            torch.cuda.empty_cache()
+            images = sequence
+            if self.make_grid:
+                samples_all.append(images)
+                if attention_output is not None:
+                    attention_all.append(attention_output)
 
-                if self.annotate:
-                    images = [
-                        annotate_image(image, prompt, font_size=self.annotate_size) for image in sequence
-                    ]
-                else:
-                    images = sequence
-                if self.make_grid:
-                    samples_all.append(images)
-                    if self.prompt2prompt_edit:
-                        if attention_output is not None:
-                            attention_all.append(attention_output)
+            save_path = os.path.join(self.logdir, f"step_{step}_{idx}_{0}_GPU{torch.cuda.current_device()}.gif")
+            save_gif_mp4_folder_type(images, save_path)
 
-                save_path = os.path.join(self.logdir, f"step_{step}_{idx}_{seed}_GPU{torch.cuda.current_device()}.gif")
-                save_gif_mp4_folder_type(images, save_path)
-
-                if self.prompt2prompt_edit:
-
-                    if attention_output is not None:
-                        save_gif_mp4_folder_type(attention_output, save_path.replace('.gif', 'atten.gif'))
+           
+            if attention_output is not None:
+                save_gif_mp4_folder_type(attention_output, save_path.replace('.gif', 'atten.gif'))
 
         if self.make_grid:
             samples_all = [make_grid(images, cols=int(np.ceil(np.sqrt(len(samples_all))))) for images in zip(*samples_all)]
