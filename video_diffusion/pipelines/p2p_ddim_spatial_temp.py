@@ -22,6 +22,7 @@ from diffusers.schedulers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
 )
+from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
 from ..models.unet_3d_condition import UNet3DConditionModel
 from .stable_diffusion import SpatiotempStableDiffusionPipeline
 from video_diffusion.prompt_attention import attention_util
@@ -42,7 +43,8 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         grid_sizeW: int=2,
         accelerator : Accelerator=None,
         data_path : str="",
-        num_inference_steps : int=0
+        num_inference_steps : int=0,
+        #pipeline_cn: StableDiffusionControlNetImg2ImgPipeline=None
         ):
         super().__init__(vae, text_encoder, tokenizer, unet, scheduler)
         self.store_controller = attention_util.AttentionStore(disk_store=disk_store,stage=0)

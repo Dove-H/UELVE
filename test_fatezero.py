@@ -18,12 +18,14 @@ from diffusers import (
     AutoencoderKL,
     DDIMScheduler,
 )
+from video_diffusion.pipelines.p2p_ddim_spatial_temp import P2pDDIMSpatiotempPipeline
+from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
 import warnings
 warnings.filterwarnings("ignore", message="Failed to load image Python extension")
 from diffusers.utils.import_utils import is_xformers_available
 from transformers import AutoTokenizer, CLIPTextModel
 from einops import rearrange
-from video_diffusion.models.unet_3d_condition import UNet3DConditionModel
+#from video_diffusion.models.unet_3d_condition import UNet3DConditionModel
 from video_diffusion.data.dataset import ImageSequenceDataset
 from video_diffusion.common.util import get_time_string, get_function_args
 from video_diffusion.common.logger import get_logger_config_path
@@ -34,67 +36,101 @@ from video_diffusion.pipelines.p2p_validation_loop import P2pSampleLogger
 
 
 def init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
-               ,test_pipeline_config,video_length,accelerator,data_path,num_inference_steps):
-    tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_path,
-        subfolder="tokenizer",
-        use_fast=False,
-    )
+               ,test_pipeline_config,video_length,accelerator,data_path,num_inference_steps,device):
+    # tokenizer = AutoTokenizer.from_pretrained(
+    #     pretrained_model_path,
+    #     subfolder="tokenizer",
+    #     use_fast=False,
+    # )
 
-    text_encoder = CLIPTextModel.from_pretrained(
-        pretrained_model_path,
-        subfolder="text_encoder",
-    )
+    # text_encoder = CLIPTextModel.from_pretrained(
+    #     pretrained_model_path,
+    #     subfolder="text_encoder",
+    # )
 
-    vae = AutoencoderKL.from_pretrained(
-        pretrained_model_path,
-        subfolder="vae",
-    )
+    # vae = AutoencoderKL.from_pretrained(
+    #     pretrained_model_path,
+    #     subfolder="vae",
+    # )
 
-    unet = UNet3DConditionModel.from_2d_model(
-        os.path.join(pretrained_model_path, "unet"), model_config=model_config, 
-        grid_sizeH=grid_sizeH , grid_sizeW=grid_sizeW
-    )
+    # unet = UNet3DConditionModel.from_2d_model(
+    #     os.path.join(pretrained_model_path, "unet"), model_config=model_config, 
+    #     grid_sizeH=grid_sizeH , grid_sizeW=grid_sizeW
+    # )
 
-    pipeline = instantiate_from_config(
-        test_pipeline_config,
-        vae=vae,
-        text_encoder=text_encoder,
-        tokenizer=tokenizer,
-        unet=unet,
-        scheduler=DDIMScheduler.from_pretrained(
-            pretrained_model_path,
-            subfolder="scheduler",
-        ),
-        disk_store= False,
-        video_length=video_length,
-        grid_sizeH=grid_sizeH,
-        grid_sizeW=grid_sizeW,
-        accelerator=accelerator,
-        data_path = data_path,
-        num_inference_steps = num_inference_steps
-    )
+    # pipeline = instantiate_from_config(
+    #     test_pipeline_config,
+    #     vae=vae,
+    #     text_encoder=text_encoder,
+    #     tokenizer=tokenizer,
+    #     unet=unet,
+    #     scheduler=DDIMScheduler.from_pretrained(
+    #         pretrained_model_path,
+    #         subfolder="scheduler",
+    #     ),
+    #     disk_store= False,
+    #     video_length=video_length,
+    #     grid_sizeH=grid_sizeH,
+    #     grid_sizeW=grid_sizeW,
+    #     accelerator=accelerator,
+    #     data_path = data_path,
+    #     num_inference_steps = num_inference_steps
+    # )
+    # 从预训练模型路径加载ControlNetModel，并将其转移到指定的设备和数据类型上
+    controlnet = ControlNetModel.from_pretrained("/mnt/fspace/vidtome_model/models--lllyasviel"
+    "--control_v11f1p_sd15_depth/snapshots/539f99181d33db39cf1af2e517cd8056785f0a87/", 
+    torch_dtype= torch.float).to(device,  torch.float)
 
-    if is_xformers_available():
-        try:
-            pipeline.enable_xformers_memory_efficient_attention()
-        except Exception as e:
-            print("xformers加载异常")
+    # 从预训练模型路径加载StableDiffusionControlNetImg2ImgPipeline，并设置controlnet参数，然后将其转移到指定的设备和数据类型上
+    pipeline_cn = StableDiffusionControlNetImg2ImgPipeline.from_pretrained("/mnt/fspace/hproject/model/stable-diffusion-v1-5", controlnet=controlnet, torch_dtype= torch.float).to(device,  torch.float) 
+    # 启用模型的CPU卸载功能，以优化内存使用
+    vae=pipeline_cn.vae
+    unet=pipeline_cn.unet
+    text_encoder=pipeline_cn.text_encoder
+    scheduler=pipeline_cn.scheduler
+    tokenizer=pipeline_cn.tokenizer
+    pipeline_cn.set_progress_bar_config(disable=True)
+    #pipeline_cn.enable_model_cpu_offload()
+    # 返回初始化后的管道对象
 
+    
     vae.requires_grad_(False)
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    pipeline.scheduler.set_timesteps(num_inference_steps)
-    pipeline.set_progress_bar_config(disable=True)
+    scheduler.set_timesteps(num_inference_steps)
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
-
     vae.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
-    return pipeline,weight_dtype
+    scheduler = DDIMScheduler.from_pretrained(
+        pretrained_model_path,
+        subfolder="scheduler"
+    )
+    pipeline = P2pDDIMSpatiotempPipeline(
+        vae=vae,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        unet=unet,
+        scheduler=scheduler,
+        disk_store=False,
+        video_length=video_length,
+        grid_sizeH=grid_sizeH,
+        grid_sizeW=grid_sizeW,
+        accelerator=accelerator,
+        data_path=data_path,
+        num_inference_steps=num_inference_steps,
+        # pipeline_cn=pipeline_cn  # 如果需要ControlNet管道，取消注释
+    )
+    if is_xformers_available():
+        try:
+            pipeline.enable_xformers_memory_efficient_attention()
+        except Exception as e:
+            print("xformers加载异常")  
+
+    return pipeline,unet,vae,text_encoder,tokenizer,weight_dtype
 
 def test(
     config: str,
@@ -127,16 +163,16 @@ def test(
         os.makedirs(logdir, exist_ok=True)
         OmegaConf.save(args, os.path.join(logdir, "config.yml"))
     
-    pipeline,weight_dtype=init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
+    pipeline,unet,vae,text_encoder,tokenizer,weight_dtype=init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
                ,test_pipeline_config,video_length,accelerator,dataset_config["path"],
-               editing_config['num_inference_steps'])
+               editing_config['num_inference_steps'],accelerator.device)
 
  
-    prompt_ids = pipeline.tokenizer(
+    prompt_ids = tokenizer(
         dataset_config["prompt"],
         truncation=True,
         padding="max_length",
-        max_length=pipeline.tokenizer.model_max_length,
+        max_length=tokenizer.model_max_length,
         return_tensors="pt",
     ).input_ids
     video_dataset = ImageSequenceDataset(**dataset_config, prompt_ids=prompt_ids,GPU_num=torch.cuda.device_count())
@@ -148,7 +184,7 @@ def test(
         
     )
     unet, train_dataloader = accelerator.prepare(
-        pipeline.unet, train_dataloader
+        unet, train_dataloader
     )
     if accelerator.is_main_process:
         accelerator.init_trackers("video")  
@@ -157,9 +193,9 @@ def test(
    
     for step, batch in enumerate(train_dataloader):
         assert batch["images"].shape[0] == 1, "Only support, overfiting on a single video"
-        pipeline.vae.eval()
-        pipeline.text_encoder.eval()
-        pipeline.unet.eval()
+        vae.eval()
+        text_encoder.eval()
+        unet.eval()
         print("batch['images'].shape=",batch['images'].shape)
         text_embeddings = pipeline._encode_prompt(
                 dataset_config.prompt,
@@ -180,8 +216,8 @@ def test(
             save_path = logdir if verbose else None,
             )
         
-        pipeline.vae.eval()
-        pipeline.text_encoder.eval()
+        vae.eval()
+        text_encoder.eval()
         unet.eval()
         images = batch["images"].to(dtype=weight_dtype)
         images = rearrange(images, "b c f h w -> (b f) c h w")
