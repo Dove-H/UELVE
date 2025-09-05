@@ -19,13 +19,13 @@ from diffusers import (
     DDIMScheduler,
 )
 from video_diffusion.pipelines.p2p_ddim_spatial_temp import P2pDDIMSpatiotempPipeline
-from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
+# from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
 import warnings
 warnings.filterwarnings("ignore", message="Failed to load image Python extension")
 from diffusers.utils.import_utils import is_xformers_available
 from transformers import AutoTokenizer, CLIPTextModel
 from einops import rearrange
-#from video_diffusion.models.unet_3d_condition import UNet3DConditionModel
+from video_diffusion.models.unet_3d_condition import UNet3DConditionModel
 from video_diffusion.data.dataset import ImageSequenceDataset
 from video_diffusion.common.util import get_time_string, get_function_args
 from video_diffusion.common.logger import get_logger_config_path
@@ -37,59 +37,61 @@ from video_diffusion.pipelines.p2p_validation_loop import P2pSampleLogger
 
 def init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
                ,test_pipeline_config,video_length,accelerator,data_path,num_inference_steps,device):
-    # tokenizer = AutoTokenizer.from_pretrained(
-    #     pretrained_model_path,
-    #     subfolder="tokenizer",
-    #     use_fast=False,
-    # )
+    tokenizer = AutoTokenizer.from_pretrained(
+        pretrained_model_path,
+        subfolder="tokenizer",
+        use_fast=False,
+    )
 
-    # text_encoder = CLIPTextModel.from_pretrained(
-    #     pretrained_model_path,
-    #     subfolder="text_encoder",
-    # )
+    text_encoder = CLIPTextModel.from_pretrained(
+        pretrained_model_path,
+        subfolder="text_encoder",
+    )
 
-    # vae = AutoencoderKL.from_pretrained(
-    #     pretrained_model_path,
-    #     subfolder="vae",
-    # )
+    vae = AutoencoderKL.from_pretrained(
+        pretrained_model_path,
+        subfolder="vae",
+    )
 
-    # unet = UNet3DConditionModel.from_2d_model(
-    #     os.path.join(pretrained_model_path, "unet"), model_config=model_config, 
-    #     grid_sizeH=grid_sizeH , grid_sizeW=grid_sizeW
-    # )
+    unet = UNet3DConditionModel.from_2d_model(
+        os.path.join(pretrained_model_path, "unet"), model_config=model_config, 
+        grid_sizeH=grid_sizeH , grid_sizeW=grid_sizeW
+    )
 
-    # pipeline = instantiate_from_config(
-    #     test_pipeline_config,
-    #     vae=vae,
-    #     text_encoder=text_encoder,
-    #     tokenizer=tokenizer,
-    #     unet=unet,
-    #     scheduler=DDIMScheduler.from_pretrained(
-    #         pretrained_model_path,
-    #         subfolder="scheduler",
-    #     ),
-    #     disk_store= False,
-    #     video_length=video_length,
-    #     grid_sizeH=grid_sizeH,
-    #     grid_sizeW=grid_sizeW,
-    #     accelerator=accelerator,
-    #     data_path = data_path,
-    #     num_inference_steps = num_inference_steps
-    # )
+    scheduler=DDIMScheduler.from_pretrained(
+            pretrained_model_path,
+            subfolder="scheduler",
+        )
+    
+    pipeline = instantiate_from_config(
+        test_pipeline_config,
+        vae=vae,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        unet=unet,
+        scheduler=scheduler,
+        disk_store= False,
+        video_length=video_length,
+        grid_sizeH=grid_sizeH,
+        grid_sizeW=grid_sizeW,
+        accelerator=accelerator,
+        data_path = data_path,
+        num_inference_steps = num_inference_steps
+    )
     # 从预训练模型路径加载ControlNetModel，并将其转移到指定的设备和数据类型上
-    controlnet = ControlNetModel.from_pretrained("/mnt/fspace/vidtome_model/models--lllyasviel"
-    "--control_v11f1p_sd15_depth/snapshots/539f99181d33db39cf1af2e517cd8056785f0a87/", 
-    torch_dtype= torch.float).to(device,  torch.float)
+    # controlnet = ControlNetModel.from_pretrained("/mnt/fspace/vidtome_model/models--lllyasviel"
+    # "--control_v11f1p_sd15_depth/snapshots/539f99181d33db39cf1af2e517cd8056785f0a87/", 
+    # torch_dtype= torch.float).to(device,  torch.float)
 
-    # 从预训练模型路径加载StableDiffusionControlNetImg2ImgPipeline，并设置controlnet参数，然后将其转移到指定的设备和数据类型上
-    pipeline_cn = StableDiffusionControlNetImg2ImgPipeline.from_pretrained("/mnt/fspace/hproject/model/stable-diffusion-v1-5", controlnet=controlnet, torch_dtype= torch.float).to(device,  torch.float) 
-    # 启用模型的CPU卸载功能，以优化内存使用
-    vae=pipeline_cn.vae
-    unet=pipeline_cn.unet
-    text_encoder=pipeline_cn.text_encoder
-    scheduler=pipeline_cn.scheduler
-    tokenizer=pipeline_cn.tokenizer
-    pipeline_cn.set_progress_bar_config(disable=True)
+    # # 从预训练模型路径加载StableDiffusionControlNetImg2ImgPipeline，并设置controlnet参数，然后将其转移到指定的设备和数据类型上
+    # pipeline_cn = StableDiffusionControlNetImg2ImgPipeline.from_pretrained("/mnt/fspace/hproject/model/stable-diffusion-v1-5", controlnet=controlnet, torch_dtype= torch.float).to(device,  torch.float) 
+    # # 启用模型的CPU卸载功能，以优化内存使用
+    # # vae=pipeline_cn.vae
+    # unet=pipeline_cn.unet
+    # text_encoder=pipeline_cn.text_encoder
+    # scheduler=pipeline_cn.scheduler
+    # tokenizer=pipeline_cn.tokenizer
+    # pipeline_cn.set_progress_bar_config(disable=True)
     #pipeline_cn.enable_model_cpu_offload()
     # 返回初始化后的管道对象
 
@@ -105,25 +107,7 @@ def init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
         weight_dtype = torch.bfloat16
     vae.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
-    scheduler = DDIMScheduler.from_pretrained(
-        pretrained_model_path,
-        subfolder="scheduler"
-    )
-    pipeline = P2pDDIMSpatiotempPipeline(
-        vae=vae,
-        text_encoder=text_encoder,
-        tokenizer=tokenizer,
-        unet=unet,
-        scheduler=scheduler,
-        disk_store=False,
-        video_length=video_length,
-        grid_sizeH=grid_sizeH,
-        grid_sizeW=grid_sizeW,
-        accelerator=accelerator,
-        data_path=data_path,
-        num_inference_steps=num_inference_steps,
-        # pipeline_cn=pipeline_cn  # 如果需要ControlNet管道，取消注释
-    )
+   
     if is_xformers_available():
         try:
             pipeline.enable_xformers_memory_efficient_attention()

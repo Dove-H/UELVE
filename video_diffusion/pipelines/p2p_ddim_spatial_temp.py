@@ -22,7 +22,7 @@ from diffusers.schedulers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
 )
-from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
+# from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
 from ..models.unet_3d_condition import UNet3DConditionModel
 from .stable_diffusion import SpatiotempStableDiffusionPipeline
 from video_diffusion.prompt_attention import attention_util
