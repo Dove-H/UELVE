@@ -7,7 +7,8 @@ from torch import nn
 # from diffusers.utils
 from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_xformers_available
-from diffusers.models.attention import FeedForward, CrossAttention, AdaLayerNorm
+from diffusers.models.attention import FeedForward, AdaLayerNorm
+from diffusers.models.cross_attention import CrossAttention
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
