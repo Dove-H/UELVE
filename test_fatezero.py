@@ -37,6 +37,11 @@ from video_diffusion.pipelines.p2p_validation_loop import P2pSampleLogger
 
 def init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
                ,test_pipeline_config,video_length,accelerator,data_path,num_inference_steps,device):
+    weight_dtype = torch.float32
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
     # tokenizer = AutoTokenizer.from_pretrained(
     #     pretrained_model_path,
     #     subfolder="tokenizer",
@@ -79,10 +84,10 @@ def init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
     # 从预训练模型路径加载ControlNetModel，并将其转移到指定的设备和数据类型上
     controlnet = ControlNetModel.from_pretrained("/mnt/fspace/vidtome_model/models--lllyasviel"
     "--control_v11f1p_sd15_depth/snapshots/539f99181d33db39cf1af2e517cd8056785f0a87/", 
-    torch_dtype= torch.float).to(device,  torch.float)
+    torch_dtype= weight_dtype).to(device, weight_dtype)
 
     # 从预训练模型路径加载StableDiffusionControlNetImg2ImgPipeline，并设置controlnet参数，然后将其转移到指定的设备和数据类型上
-    pipeline_cn = StableDiffusionControlNetImg2ImgPipeline.from_pretrained("/mnt/fspace/hproject/model/stable-diffusion-v1-5", controlnet=controlnet, torch_dtype= torch.float).to(device,  torch.float) 
+    pipeline_cn = StableDiffusionControlNetImg2ImgPipeline.from_pretrained("/mnt/fspace/hproject/model/stable-diffusion-v1-5", controlnet=controlnet, torch_dtype= weight_dtype).to(device,  weight_dtype) 
     # 启用模型的CPU卸载功能，以优化内存使用
     vae=pipeline_cn.vae
     unet=pipeline_cn.unet
@@ -102,11 +107,7 @@ def init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
     scheduler.set_timesteps(num_inference_steps)
-    weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
+    
     vae.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
 
@@ -116,6 +117,7 @@ def init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
         tokenizer=tokenizer,
         unet=unet,
         scheduler=scheduler,
+        controlnet=controlnet,  # 添加ControlNet
         disk_store=False,
         video_length=video_length,
         grid_sizeH=grid_sizeH,
@@ -131,7 +133,7 @@ def init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
         except Exception as e:
             print("xformers加载异常")  
 
-    return pipeline,unet,vae,text_encoder,tokenizer,weight_dtype
+    return pipeline,unet,vae,text_encoder,tokenizer,weight_dtype,controlnet 
 
 def test(
     config: str,
@@ -151,6 +153,7 @@ def test(
     args = get_function_args()
     grid_sizeH = editing_config["grid_sizeH"]
     grid_sizeW = editing_config["grid_sizeW"]
+    controlnet_conditioning_scale=1.0
     video_length = dataset_config["n_sample_frame"]
     time_string = get_time_string()
     if logdir is None:
@@ -164,7 +167,7 @@ def test(
         os.makedirs(logdir, exist_ok=True)
         OmegaConf.save(args, os.path.join(logdir, "config.yml"))
     
-    pipeline,unet,vae,text_encoder,tokenizer,weight_dtype=init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
+    pipeline,unet,vae,text_encoder,tokenizer,weight_dtype,controlnet=init_model(pretrained_model_path,grid_sizeH,grid_sizeW,model_config
                ,test_pipeline_config,video_length,accelerator,dataset_config["path"],
                editing_config['num_inference_steps'],accelerator.device)
 
@@ -190,14 +193,20 @@ def test(
     if accelerator.is_main_process:
         accelerator.init_trackers("video")  
 
-    validation_sample_logger = P2pSampleLogger(**editing_config, logdir=logdir, source_prompt=dataset_config['prompt'])
+    validation_sample_logger = P2pSampleLogger(**editing_config, logdir=logdir, source_prompt=dataset_config['prompt'],controlnet_conditioning_scale=controlnet_conditioning_scale)
    
     for step, batch in enumerate(train_dataloader):
         assert batch["images"].shape[0] == 1, "Only support, overfiting on a single video"
         vae.eval()
         text_encoder.eval()
         unet.eval()
+        controlnet.eval()
         print("batch['images'].shape=",batch['images'].shape)
+        # 生成深度图作为控制条件
+        images_for_depth = rearrange(batch["images"].to(dtype=weight_dtype), "b c f h w -> (b f) c h w")
+        depth_images = P2pDDIMSpatiotempPipeline.depth_preprocess(images_for_depth)
+        depth_images = depth_images.to(device=accelerator.device, dtype=weight_dtype)
+
         text_embeddings = pipeline._encode_prompt(
                 dataset_config.prompt,
                 device = accelerator.device,
@@ -206,6 +215,7 @@ def test(
                 negative_prompt=None
         )
         use_inversion_attention =  editing_config.get('use_inversion_attention', False)
+        controlnet_conditioning_scale = 1.0
         batch['ddim_init_latents']  = pipeline.prepare_latents_ddim_inverted(
             rearrange(batch["images"].to(dtype=weight_dtype), "b c f h w -> (b f) c h w"),
             batch_size = 1,
@@ -215,11 +225,14 @@ def test(
             store_attention=use_inversion_attention,
             LOW_RESOURCE = True, # not classifier-free guidance
             save_path = logdir if verbose else None,
+            controlnet_conditioning_scale=controlnet_conditioning_scale,
+            control_image=depth_images,  # 传入深度图作为控制条件
             )
         
         vae.eval()
         text_encoder.eval()
         unet.eval()
+        controlnet.eval()
         images = batch["images"].to(dtype=weight_dtype)
         images = rearrange(images, "b c f h w -> (b f) c h w")
 
@@ -230,7 +243,8 @@ def test(
                 device=accelerator.device,
                 step=0,
                 latents = batch['ddim_init_latents'],
-                save_dir = logdir if verbose else None
+                save_dir = logdir if verbose else None,
+                control_image=depth_images,  # 传入控制图像
             )
 
     if torch.cuda.device_count()>1:

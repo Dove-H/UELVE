@@ -37,6 +37,7 @@ class P2pSampleLogger:
         use_inversion_attention: bool = True,
         source_prompt: str = None,
         traverse_p2p_config: bool = False,
+        controlnet_conditioning_scale: float = 1.0,  # 添加ControlNet参数
         **args
     ) -> None:
         self.editing_prompts = editing_prompts
@@ -57,6 +58,7 @@ class P2pSampleLogger:
         self.use_inversion_attention = use_inversion_attention
         self.source_prompt = source_prompt
         self.traverse_p2p_config =traverse_p2p_config
+        self.controlnet_conditioning_scale = controlnet_conditioning_scale 
 
     def log_sample_images(
         self, pipeline: DiffusionPipeline,
@@ -65,6 +67,7 @@ class P2pSampleLogger:
         latents: torch.FloatTensor = None,
         uncond_embeddings_list: List[torch.FloatTensor] = None,
         save_dir = None,
+        control_image: torch.FloatTensor = None,  # 添加控制图像参数
     ):
         torch.cuda.empty_cache()
         samples_all = []
@@ -96,6 +99,8 @@ class P2pSampleLogger:
                 latents = latents,
                 uncond_embeddings_list = uncond_embeddings_list,
                 save_path = save_dir,
+                control_image=control_image,
+                controlnet_conditioning_scale= self.controlnet_conditioning_scale, 
                 **p2p_config_now,
             )
        
