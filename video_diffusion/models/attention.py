@@ -14,6 +14,7 @@ from diffusers import ModelMixin
 
 from diffusers.models.attention import FeedForward, AdaLayerNorm
 from diffusers.models.cross_attention import CrossAttention
+# from diffusers.models.attention import FeedForward, CrossAttention, AdaLayerNorm
 from diffusers.utils import BaseOutput
 from diffusers.utils.import_utils import is_xformers_available
 
@@ -393,6 +394,7 @@ class SpatiotempTransformerBlock(nn.Module):
 
 
 class SparseCausalAttention(CrossAttention):
+
     def forward(
         self,
         hidden_states,

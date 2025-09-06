@@ -39,7 +39,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         tokenizer: CLIPTokenizer,
         unet: UNet3DConditionModel,
         scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler, EulerDiscreteScheduler, EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler,],
-        controlnet: ControlNetModel = None,
+        controlnet:  None,
         disk_store: bool=False,
         video_length: int=8,
         grid_sizeH: int=2,
@@ -53,10 +53,10 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         self.scheduler=scheduler
         self.controlnet = controlnet
        
-        #self.store_controller = attention_util.AttentionStore(disk_store=disk_store,stage=0)
-        #self.empty_controller = attention_util.EmptyControl()
-        self.store_controller = None
-        self.empty_controller = None
+        self.store_controller = attention_util.AttentionStore(disk_store=disk_store,stage=0)
+        self.empty_controller = attention_util.EmptyControl()
+        # self.store_controller = None
+        # self.empty_controller = None
         self.grid_sizeH=grid_sizeH
         self.grid_sizeW=grid_sizeW
         self.accelerator=accelerator
@@ -101,8 +101,6 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         latents_grid = torch.cat(encoded_batches, dim=0)
         return latents_grid
     
-
-
     def depth_preprocess(images):
         """处理图像生成深度图"""
         image_ls = []
@@ -139,11 +137,11 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                                       ):
  
         self.prepare_before_train_loop()
-
-        # if store_attention:
-        #     attention_util.register_attention_control(self, self.store_controller)
-        #resource_default_value = self.store_controller.LOW_RESOURCE
-        #self.store_controller.LOW_RESOURCE = LOW_RESOURCE  # in inversion, no CFG, record all latents attention
+        
+        if store_attention:
+            attention_util.register_attention_control(self, self.store_controller)
+        resource_default_value = self.store_controller.LOW_RESOURCE
+        self.store_controller.LOW_RESOURCE = LOW_RESOURCE  # in inversion, no CFG, record all latents attention
         batch_size = batch_size * num_images_per_prompt
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
@@ -159,15 +157,13 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         init_latents_bcfhw = rearrange(init_latents, "(b f) c h w -> b c f h w", b=batch_size)
         os.makedirs(self.latents_path, exist_ok = True)
         os.makedirs(self.attention_path, exist_ok = True)
-        control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=batch_size)
-        control_image = grid.combine_frames_in_grid(control_image, self.grid_sizeH, self.grid_sizeW)
-        
+        #control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=batch_size)
+        #control_image = grid.combine_frames_in_grid(control_image, self.grid_sizeH, self.grid_sizeW)
         ddim_latent = self.ddim_clean2noisy_loop(init_latents_bcfhw, text_embeddings, self.store_controller, controlnet_conditioning_scale=controlnet_conditioning_scale,
             control_image=control_image)
-        
-        # if store_attention and (save_path is not None) :
-        #     attention_util.register_attention_control(self, self.empty_controller)
-        #self.store_controller.LOW_RESOURCE = resource_default_value
+        if store_attention and (save_path is not None) :
+            attention_util.register_attention_control(self, self.empty_controller)
+        self.store_controller.LOW_RESOURCE = resource_default_value
         return ddim_latent
     
 
@@ -176,35 +172,31 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         noise_preds = []
 
         for i, latent_grid in enumerate(latent_grids):
-            #noise_pred = unet(latent_grid, t, encoder_hidden_states=text_embeddings,indices=b_indices[i]).sample
-            latent_grid = latent_grid.squeeze(2)
-            latent_grid = latent_grid.to(self.controlnet.dtype)
             # 准备控制图像
-
-            controlnet_cond = control_image[:, :, i, :, :] if control_image.dim() == 5 else control_image
-            print("latent_grid=",latent_grid.shape)
-            print("controlnet_cond.shape=",controlnet_cond.shape)
+            # latent_grid = latent_grid.squeeze(2)
+            # latent_grid = latent_grid.to(self.controlnet.dtype)
+            #controlnet_cond = control_image[:, :, i, :, :] if control_image.dim() == 5 else control_image
+            
             # ControlNet前向传播
-            down_block_res_samples, mid_block_res_sample = self.controlnet(
-                latent_grid,
-                t,
-                encoder_hidden_states=text_embeddings,
-                controlnet_cond=controlnet_cond,
-                conditioning_scale=controlnet_conditioning_scale,
-                return_dict=False,
-            )
-            
+            # down_block_res_samples, mid_block_res_sample = self.controlnet(
+            #     latent_grid,
+            #     t,
+            #     encoder_hidden_states=text_embeddings,
+            #     controlnet_cond=controlnet_cond,
+            #     conditioning_scale=controlnet_conditioning_scale,
+            #     return_dict=False,
+            # )
+    
             # UNet前向传播
-            noise_pred = self.unet(
-                latent_grid,
-                t,
-                encoder_hidden_states=text_embeddings,
-                down_block_additional_residuals=down_block_res_samples,
-                mid_block_additional_residual=mid_block_res_sample,
-            ).sample
-           # noise_pred = unet(latent_grid, t, encoder_hidden_states=text_embeddings).sample
-            noise_pred=noise_pred.unsqueeze(2)
-            
+            # noise_pred = self.unet(
+            #     latent_grid,
+            #     t,
+            #     encoder_hidden_states=text_embeddings,
+            #     down_block_additional_residuals=down_block_res_samples,
+            #     mid_block_additional_residual=mid_block_res_sample,
+            # ).sample
+            #noise_pred=noise_pred.unsqueeze(2)
+            noise_pred = unet(latent_grid, t, encoder_hidden_states=text_embeddings,indices=b_indices[i]).sample
             noise_preds.append(noise_pred)
         noise_pred = torch.cat(noise_preds, dim=2)
         return noise_pred
@@ -225,25 +217,25 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
             torch.save(latent, os.path.join(
                         self.latents_path, f'{i}.pt'))  
             time_end=time.time()
-            # if torch.cuda.device_count()>1:
-            #     latent,indices= self.alternate_multiGPU(latent,i)
-            # else:
-            #     latent,indices= self.alternate(latent,i)
-            #b_indices=self.reassign_values(indices, self.grid_sizeH,self.grid_sizeW)
-            b_indices=None
+            if torch.cuda.device_count()>1:
+                latent,indices= self.alternate_multiGPU(latent,i)
+            else:
+                latent,indices= self.alternate(latent,i)
+            b_indices=self.reassign_values(indices, self.grid_sizeH,self.grid_sizeW)
+            # b_indices=None
             noise_pred=self.process_with_unet(self.unet,latent,t,cond_embeddings,b_indices,control_image, controlnet_conditioning_scale)
      
             latent = self.next_clean2noise_step(noise_pred, t, latent)
            
-            # if controller is not None: 
-            #     latent=grid.restore_frames_from_grid(latent,self.grid_sizeH,self.grid_sizeW)
-            #     sqs=torch.argsort(torch.tensor(indices))
-            #     latent=latent[:, :, sqs, :, :]
-            #     latent=grid.combine_frames_in_grid(latent,self.grid_sizeH,self.grid_sizeW)
-            #     latent = controller.step_callback(latent,0,self.attention_path)
-            #     latent=grid.restore_frames_from_grid(latent,self.grid_sizeH,self.grid_sizeW)
-            #     latent=latent[:, :, indices, :, :]
-            #     latent=grid.combine_frames_in_grid(latent,self.grid_sizeH,self.grid_sizeW)
+            if controller is not None: 
+                latent=grid.restore_frames_from_grid(latent,self.grid_sizeH,self.grid_sizeW)
+                sqs=torch.argsort(torch.tensor(indices))
+                latent=latent[:, :, sqs, :, :]
+                latent=grid.combine_frames_in_grid(latent,self.grid_sizeH,self.grid_sizeW)
+                latent = controller.step_callback(latent,0,self.attention_path)
+                latent=grid.restore_frames_from_grid(latent,self.grid_sizeH,self.grid_sizeW)
+                latent=latent[:, :, indices, :, :]
+                latent=grid.combine_frames_in_grid(latent,self.grid_sizeH,self.grid_sizeW)
             latent = latent.to(weight_dtype)
             torch.cuda.empty_cache()
         
@@ -284,28 +276,28 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         equal_length = (len_source == len_target)
         print(f" len_source: {len_source}, len_target: {len_target}, equal_length: {equal_length}")
         edit_controller=None
-        # edit_controller = attention_util.make_controller(
-        #                     self.tokenizer, 
-        #                     [ kwargs['source_prompt'], kwargs['prompt']],
-        #                     NUM_DDIM_STEPS = kwargs['num_inference_steps'],
-        #                     is_replace_controller=kwargs.get('is_replace_controller', True) and equal_length,
-        #                     cross_replace_steps=kwargs['cross_replace_steps'], 
-        #                     self_replace_steps=kwargs['self_replace_steps'], 
-        #                     blend_words=kwargs.get('blend_words', None),
-        #                     equilizer_params=kwargs.get('eq_params', None),
-        #                     additional_attention_store=self.store_controller,
-        #                     use_inversion_attention = kwargs['use_inversion_attention'],
-        #                     blend_self_th = kwargs.get('blend_self_th', (0.3, 0.3)),
-        #                     blend_latents_th = kwargs.get('blend_latents_th', (0.3, 0.3)),
-        #                     blend_self_attention = kwargs.get('blend_self_attention', None),
-        #                     blend_latents=kwargs.get('blend_latents', None),
-        #                     save_path=kwargs.get('save_path', None),
-        #                     save_self_attention = kwargs.get('save_self_attention', True),
-        #                     disk_store = kwargs.get('disk_store', False),
-        #                     attention_path=self.attention_path  # 传递参数
-        #                     )
+        edit_controller = attention_util.make_controller(
+                            self.tokenizer, 
+                            [ kwargs['source_prompt'], kwargs['prompt']],
+                            NUM_DDIM_STEPS = kwargs['num_inference_steps'],
+                            is_replace_controller=kwargs.get('is_replace_controller', True) and equal_length,
+                            cross_replace_steps=kwargs['cross_replace_steps'], 
+                            self_replace_steps=kwargs['self_replace_steps'], 
+                            blend_words=kwargs.get('blend_words', None),
+                            equilizer_params=kwargs.get('eq_params', None),
+                            additional_attention_store=self.store_controller,
+                            use_inversion_attention = kwargs['use_inversion_attention'],
+                            blend_self_th = kwargs.get('blend_self_th', (0.3, 0.3)),
+                            blend_latents_th = kwargs.get('blend_latents_th', (0.3, 0.3)),
+                            blend_self_attention = kwargs.get('blend_self_attention', None),
+                            blend_latents=kwargs.get('blend_latents', None),
+                            save_path=kwargs.get('save_path', None),
+                            save_self_attention = kwargs.get('save_self_attention', True),
+                            disk_store = kwargs.get('disk_store', False),
+                            attention_path=self.attention_path  # 传递参数
+                            )
         
-        # attention_util.register_attention_control(self, edit_controller)
+        attention_util.register_attention_control(self, edit_controller)
         
 
         # In ddim inferece, no need source prompt
@@ -315,20 +307,20 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
             controlnet_conditioning_scale=controlnet_conditioning_scale, 
             # target_prompt = kwargs['prompts'][1],
             **kwargs)
-        # if hasattr(edit_controller.latent_blend, 'mask_list'):
-        #     mask_list = edit_controller.latent_blend.mask_list
-        # else:
-        mask_list = None
-        # if len(edit_controller.attention_store.keys()) > 0:
-        #     attention_output = None
-        # else:
-        attention_output = None
+        if hasattr(edit_controller.latent_blend, 'mask_list'):
+            mask_list = edit_controller.latent_blend.mask_list
+        else:
+            mask_list = None
+        if len(edit_controller.attention_store.keys()) > 0:
+            attention_output = None
+        else:
+            attention_output = None
         dict_output = {
                 "sdimage_output" : sdimage_output,
                 "attention_output" : attention_output,
                 "mask_list" : mask_list,
             }
-        #attention_util.register_attention_control(self, self.empty_controller)
+        attention_util.register_attention_control(self, self.empty_controller)
         return dict_output
     
     def alternate(self,latents,flag):
@@ -491,19 +483,19 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
 
         # 7. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-        print("controlnet_image.shape=",control_image.shape)
-        control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=2)
-        control_image = grid.combine_frames_in_grid(control_image, self.grid_sizeH, self.grid_sizeW)
+        #print("controlnet_image.shape=",control_image.shape)
+        # control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=2)
+        # control_image = grid.combine_frames_in_grid(control_image, self.grid_sizeH, self.grid_sizeW)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(tqdm(timesteps)):
-                # if torch.cuda.device_count()>1:
-                #     latents,indices= self.alternate_multiGPU(latents,i)
-                # else:
-                #     latents,indices= self.alternate(latents,i)
+                if torch.cuda.device_count()>1:
+                    latents,indices= self.alternate_multiGPU(latents,i)
+                else:
+                    latents,indices= self.alternate(latents,i)
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-                #b_indices=self.reassign_values(indices, self.grid_sizeH,self.grid_sizeW)
+                b_indices=self.reassign_values(indices, self.grid_sizeH,self.grid_sizeW)
                 # predict the noise residual
                 latent_grids_in_unet = latent_model_input.split(1, dim=2)
                 latent_grid=latents.split(1, dim=2)
@@ -513,34 +505,33 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                 
               
                 for j, latent_grid_in_unet in enumerate(latent_grids_in_unet):
-                    latent_grid_in_unet = latent_grid_in_unet.squeeze(2)
                     # 准备控制图像
-                    controlnet_cond = None
-                    if control_image is not None:
-                        controlnet_cond = control_image[:, :, j, :, :] if control_image.dim() == 5 else control_image
-                    print("latent_grid_in_unet.shape=",latent_grid_in_unet.shape)
-                    print("controlnet_cond.shape=",controlnet_cond.shape)
+                    # latent_grid_in_unet = latent_grid_in_unet.squeeze(2)
+                    # controlnet_cond = None
+                    # if control_image is not None:
+                    #     controlnet_cond = control_image[:, :, j, :, :] if control_image.dim() == 5 else control_image
+
                     # 使用ControlNet进行预测
-                    if self.controlnet is not None and controlnet_cond is not None:
+                    # if self.controlnet is not None and controlnet_cond is not None:
                      
-                        down_block_res_samples, mid_block_res_sample = self.controlnet(
-                            latent_grid_in_unet,
-                            t,
-                            encoder_hidden_states=text_embeddings,
-                            controlnet_cond=controlnet_cond,
-                            conditioning_scale=controlnet_conditioning_scale,
-                            return_dict=False,
-                        )
+                    #     down_block_res_samples, mid_block_res_sample = self.controlnet(
+                    #         latent_grid_in_unet,
+                    #         t,
+                    #         encoder_hidden_states=text_embeddings,
+                    #         controlnet_cond=controlnet_cond,
+                    #         conditioning_scale=controlnet_conditioning_scale,
+                    #         return_dict=False,
+                    #     )
                         
-                        noise_pred = self.unet(
-                            latent_grid_in_unet,
-                            t,
-                            encoder_hidden_states=text_embeddings,
-                            down_block_additional_residuals=down_block_res_samples,
-                            mid_block_additional_residual=mid_block_res_sample,
-                        ).sample
-                    #noise_pred = self.unet(latent_grids_in_unet, t, encoder_hidden_states=text_embeddings).sample.to(dtype=latents_dtype)
-                    noise_pred=noise_pred.unsqueeze(2).to(dtype=latents_dtype)
+                    #     noise_pred = self.unet(
+                    #         latent_grid_in_unet,
+                    #         t,
+                    #         encoder_hidden_states=text_embeddings,
+                    #         down_block_additional_residuals=down_block_res_samples,
+                    #         mid_block_additional_residual=mid_block_res_sample,
+                    #     ).sample
+                    noise_pred = self.unet(latent_grid_in_unet, t, encoder_hidden_states=text_embeddings).sample.to(dtype=latents_dtype)
+                    #noise_pred=noise_pred.unsqueeze(2).to(dtype=latents_dtype)
                     if do_classifier_free_guidance:
                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -551,15 +542,15 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                     weight_type = latents.dtype
                     latents_b.append(latent)
                 latents = torch.cat(latents_b, dim=2)
-                # if controller is not None:
-                #             latents=grid.restore_frames_from_grid(latents,self.grid_sizeH,self.grid_sizeW)
-                #             sqs=torch.argsort(torch.tensor(indices))
-                #             latents=latents[:, :, sqs, :, :]
-                #             latents=grid.combine_frames_in_grid(latents,self.grid_sizeH,self.grid_sizeW)
-                #             latents = controller.step_callback(latents,self.num_inference_steps-i-1,self.latents_path).to(device, dtype=weight_type)
-                #             latents=grid.restore_frames_from_grid(latents,self.grid_sizeH,self.grid_sizeW)
-                #             latents=latents[:, :, indices, :, :]
-                #             latents=grid.combine_frames_in_grid(latents,self.grid_sizeH,self.grid_sizeW)
+                if controller is not None:
+                            latents=grid.restore_frames_from_grid(latents,self.grid_sizeH,self.grid_sizeW)
+                            sqs=torch.argsort(torch.tensor(indices))
+                            latents=latents[:, :, sqs, :, :]
+                            latents=grid.combine_frames_in_grid(latents,self.grid_sizeH,self.grid_sizeW)
+                            latents = controller.step_callback(latents,self.num_inference_steps-i-1,self.latents_path).to(device, dtype=weight_type)
+                            latents=grid.restore_frames_from_grid(latents,self.grid_sizeH,self.grid_sizeW)
+                            latents=latents[:, :, indices, :, :]
+                            latents=grid.combine_frames_in_grid(latents,self.grid_sizeH,self.grid_sizeW)
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
