@@ -9,12 +9,16 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 from torch import nn
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-# from diffusers.modeling_utils import ModelMixin
-from diffusers import ModelMixin
 
-from diffusers.models.attention import FeedForward, AdaLayerNorm
-from diffusers.models.cross_attention import CrossAttention
-# from diffusers.models.attention import FeedForward, CrossAttention, AdaLayerNorm
+#C/F
+# from diffusers.models.cross_attention import CrossAttention
+# from diffusers.models.attention import FeedForward, AdaLayerNorm
+# from diffusers import ModelMixin
+
+#F/C
+from diffusers.modeling_utils import ModelMixin
+from diffusers.models.attention import FeedForward, CrossAttention, AdaLayerNorm
+
 from diffusers.utils import BaseOutput
 from diffusers.utils.import_utils import is_xformers_available
 
@@ -393,6 +397,8 @@ class SpatiotempTransformerBlock(nn.Module):
         return hidden_states
 
 
+
+
 class SparseCausalAttention(CrossAttention):
 
     def forward(
@@ -482,3 +488,4 @@ class SparseCausalAttention(CrossAttention):
         # dropout
         hidden_states = self.to_out[1](hidden_states)
         return hidden_states
+    
