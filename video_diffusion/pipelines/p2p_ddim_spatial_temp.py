@@ -22,10 +22,6 @@ from diffusers.schedulers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
 )
-# C/F 导入controlnet相关的包
-# from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
-
-from ..models.unet_3d_condition import UNet3DConditionModel
 from .stable_diffusion import SpatiotempStableDiffusionPipeline
 from video_diffusion.prompt_attention import attention_util
 import torchvision.transforms as T
@@ -39,10 +35,9 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         vae: AutoencoderKL,
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
-        unet: UNet3DConditionModel,
+        unet,
         scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler, EulerDiscreteScheduler, EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler,],
-        # controlnet: ControlNetModel = None, #C/F
-        controlnet:  None, #F/C
+        controlnet, 
         method:str,
         disk_store: bool=False,
         video_length: int=8,
@@ -51,13 +46,11 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         accelerator : Accelerator=None,
         data_path : str="",
         num_inference_steps : int=0,
-        #pipeline_cn: StableDiffusionControlNetImg2ImgPipeline=None
         ):
         super().__init__(vae, text_encoder, tokenizer, unet, scheduler)
         self.method=method
         self.scheduler=scheduler
         self.controlnet = controlnet
-        self.vae=vae
         if method=="FateZero":
             #F/C FateZero需要初始化controller
             self.store_controller = attention_util.AttentionStore(disk_store=disk_store,stage=0)
@@ -111,29 +104,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         latents_grid = torch.cat(encoded_batches, dim=0)
         return latents_grid
     
-    def depth_preprocess(images):
-        """处理图像生成深度图"""
-        image_ls = []
-        for img in images:
-            if isinstance(img, torch.Tensor):
-                img = T.ToPILImage()(img)
-            image_ls.append(img)
-        # 使用本地模型路径
-        local_model_path = "/mnt/fspace/vidtome_model/models--Intel--dpt-large/snapshots/bc15f29aa3a80d532f2ed650b5e16ac48d8958f9"  # 替换为你的本地模型路径
-        # 尝试使用本地模型
-        depth_estimator = transformers.pipeline(
-            'depth-estimation', 
-            model=local_model_path,
-            local_files_only=True
-        )
-        results = depth_estimator(image_ls)
-        depth_ls = []
-        for r in results:
-            depth_ls.append(T.ToTensor()(r['depth']))
-        
-        depth = torch.stack(depth_ls, dim=0)
-        depth = torch.cat([depth, depth, depth], dim=1)  # 转换为3通道
-        return depth
+    
 
     @torch.no_grad()
     def prepare_latents_ddim_inverted(self, image, batch_size,num_images_per_prompt, 
@@ -260,8 +231,8 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                     latent=grid.restore_frames_from_grid(latent,self.grid_sizeH,self.grid_sizeW)
                     latent=latent[:, :, indices, :, :]
                     latent=grid.combine_frames_in_grid(latent,self.grid_sizeH,self.grid_sizeW)
-                latent = latent.to(weight_dtype)
-                torch.cuda.empty_cache()
+            latent = latent.to(weight_dtype)
+            torch.cuda.empty_cache()
         return latent
 
     
@@ -434,22 +405,6 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         control_image = kwargs.pop('control_image', None)
         controlnet_conditioning_scale = kwargs.pop('controlnet_conditioning_scale', 1.0)
         assert edit_type in ['save', 'swap', None]
-        if edit_type is None:
-            return self.sd_ddim_pipeline(controller = None, control_image=control_image,
-            controlnet_conditioning_scale=controlnet_conditioning_scale,**kwargs)
-        if edit_type == 'save':
-            sdimage_output = self.sd_ddim_pipeline(controller = None, control_image=control_image,
-            controlnet_conditioning_scale=controlnet_conditioning_scale,**kwargs)
-            mask_list = None
-            attention_output=None
-            dict_output = {
-                "sdimage_output" : sdimage_output,
-                "attention_output"   : attention_output,
-                'mask_list':  mask_list
-            }
-            # Detach the controller for safety
-            attention_util.register_attention_control(self, self.empty_controller)
-            return dict_output
         if edit_type == 'swap':
             return self.p2preplace_edit(control_image=control_image,
             controlnet_conditioning_scale=controlnet_conditioning_scale,**kwargs)
@@ -499,7 +454,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
         # 5. Prepare control image
-        if self.method =="ControlNet":
+        if control_image is not None:
             control_image = control_image.to(device=device, dtype=text_embeddings.dtype)
             if do_classifier_free_guidance:
                 control_image = torch.cat([control_image] * 2)

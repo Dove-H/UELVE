@@ -24,7 +24,7 @@ from diffusers.schedulers import (
 from diffusers.utils import deprecate, logging
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 
-from ..models.unet_3d_condition import UNet3DConditionModel
+# from ..models.unet_3d_condition import UNet3DConditionModel
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -41,7 +41,7 @@ class SpatiotempStableDiffusionPipeline(DiffusionPipeline):
         vae: AutoencoderKL,
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
-        unet: UNet3DConditionModel,
+        unet,
         scheduler: Union[
             DDIMScheduler,
             PNDMScheduler,

@@ -1,64 +1,73 @@
 import os
 import sys
-local_diffusers_path = '/mnt/fspace/hproject/ELVE/diffusersC/'
-if local_diffusers_path in sys.path:
-    sys.path.remove(local_diffusers_path)
-sys.path.insert(0, local_diffusers_path)
-
-def clear_diffusers_cache():
-    modules_to_remove = []
-    for module_name in list(sys.modules.keys()):
-        if (module_name.startswith('diffusers') or 
-            module_name.startswith('transformers') or
-            module_name.startswith('torch')):
-            modules_to_remove.append(module_name)
-    
-    for module_name in modules_to_remove:
-        del sys.modules[module_name]
-    
-    print(f"进程 {os.getpid()} 已清理 {len(modules_to_remove)} 个模块缓存")
-
-# 立即清理缓存
-clear_diffusers_cache()
-
-import diffusers
-print("________________",diffusers.__file__)
 from glob import glob
-import copy
-import imageio
 from typing import Optional,Dict
-from tqdm.auto import tqdm
 from omegaconf import OmegaConf
 import click
 import torch.distributed as dist
 import torch
 import torch.utils.data
-import torch.utils.checkpoint
 from PIL import Image
 from accelerate import Accelerator
-from accelerate.logging import get_logger
-from accelerate.utils import set_seed
-from diffusers import (
-    AutoencoderKL,
-    DDIMScheduler,
-)
 import warnings
+from contextlib import contextmanager  # 添加这行导入
 warnings.filterwarnings("ignore", message="Failed to load image Python extension")
-from diffusers.utils.import_utils import is_xformers_available
 from transformers import AutoTokenizer, CLIPTextModel
 from einops import rearrange
-from video_diffusion.models.unet_3d_condition import UNet3DConditionModel
+import torchvision.transforms as T
+import transformers
 from video_diffusion.data.dataset import ImageSequenceDataset
 from video_diffusion.common.util import get_time_string, get_function_args
-from video_diffusion.common.logger import get_logger_config_path
-from video_diffusion.common.image_util import log_train_samples
 from video_diffusion.common.instantiate_from_config import instantiate_from_config
 from video_diffusion.pipelines.p2p_validation_loop import P2pSampleLogger
 
+# diffusers 路径管理函数
+def setup_diffusers_path(method):
+    """根据 method 参数设置不同的 diffusers 路径"""
+    if method == "FateZero":
+        local_diffusers_path = '/mnt/fspace/hproject/ELVE/diffusersF/'
+    elif method == "ControlNet":
+        local_diffusers_path = '/mnt/fspace/hproject/ELVE/diffusersC/'
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    if local_diffusers_path in sys.path:
+        sys.path.remove(local_diffusers_path)  
+    sys.path.insert(0, local_diffusers_path)
+    #print(f"已设置 {method} 的 diffusers 路径: {local_diffusers_path}")
+    return local_diffusers_path
 
+def clear_diffusers_cache():
+    """只清理 diffusers 和 transformers 相关模块缓存，不清理 torch"""
+    modules_to_remove = []
+    for module_name in list(sys.modules.keys()):
+        if (module_name.startswith('diffusers') or 
+            module_name.startswith('transformers')):
+            # 确保不删除当前的 transformers 模块（如果已经导入）
+            if module_name != 'transformers' and not module_name.startswith('transformers.'):
+                modules_to_remove.append(module_name)
+    for module_name in modules_to_remove:
+        del sys.modules[module_name]
+    #print(f"进程 {os.getpid()} 已清理 {len(modules_to_remove)} 个模块缓存")
+
+@contextmanager
+def diffusers_context(method):
+    """diffusers 版本切换的上下文管理器"""
+    local_diffusers_path = setup_diffusers_path(method)
+    clear_diffusers_cache()
+    
+    try:
+        yield local_diffusers_path
+    finally:
+        # 可选：恢复原始路径（如果需要）
+        pass
 
 def init_model(pretrained_model_path,method,grid_sizeH,grid_sizeW,model_config
                ,test_pipeline_config,video_length,accelerator,data_path,num_inference_steps,device):
+    
+    # 动态导入 diffusers 相关模块
+    import diffusers
+    from diffusers import AutoencoderKL, DDIMScheduler
+    from diffusers.utils.import_utils import is_xformers_available
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -67,6 +76,7 @@ def init_model(pretrained_model_path,method,grid_sizeH,grid_sizeW,model_config
 
     if method=="FateZero":
         #F/C FateZero的模型初始化
+        from video_diffusion.models.unet_3d_condition import UNet3DConditionModel
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_path,
             subfolder="tokenizer",
@@ -110,10 +120,10 @@ def init_model(pretrained_model_path,method,grid_sizeH,grid_sizeW,model_config
     elif method=="ControlNet":
         # C/F ControlNetModel的模型初始化
         from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
-        #from video_diffusion.pipelines.p2p_ddim_spatial_temp import P2pDDIMSpatiotempPipeline
-        controlnet = ControlNetModel.from_pretrained("/mnt/fspace/vidtome_model/models--lllyasviel"
-        "--control_v11f1p_sd15_depth/snapshots/539f99181d33db39cf1af2e517cd8056785f0a87/", 
-        torch_dtype= weight_dtype).to(device, weight_dtype)
+        controlnet = ControlNetModel.from_pretrained(
+        "/mnt/fspace/vidtome_model/models--lllyasviel--control_v11f1p_sd15_depth/snapshots/539f99181d33db39cf1af2e517cd8056785f0a87/", 
+        torch_dtype=weight_dtype  # 添加这一行
+              ).to(device, weight_dtype)
         pipeline_cn = StableDiffusionControlNetImg2ImgPipeline.from_pretrained("/mnt/fspace/hproject/model/stable-diffusion-v1-5", controlnet=controlnet, torch_dtype= weight_dtype).to(device,  weight_dtype)
     
         vae=pipeline_cn.vae
@@ -141,24 +151,6 @@ def init_model(pretrained_model_path,method,grid_sizeH,grid_sizeW,model_config
             num_inference_steps = num_inference_steps
         )
     
-        # pipeline = P2pDDIMSpatiotempPipeline(
-        #     vae=vae,
-        #     text_encoder=text_encoder,
-        #     tokenizer=tokenizer,
-        #     unet=unet,
-        #     scheduler=scheduler,
-        #     controlnet=controlnet,  
-        #     method=method,
-        #     disk_store=False,
-        #     video_length=video_length,
-        #     grid_sizeH=grid_sizeH,
-        #     grid_sizeW=grid_sizeW,
-        #     accelerator=accelerator,
-        #     data_path=data_path,
-        #     num_inference_steps=num_inference_steps,
-        #     # pipeline_cn=pipeline_cn  # 如果需要ControlNet管道，取消注释
-        # )
-
     vae.requires_grad_(False)
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
@@ -190,7 +182,11 @@ def test(
     verbose: bool=True,
     **kwargs
 ):
-    
+    # 使用上下文管理器设置 diffusers 环境
+    with diffusers_context(method):
+        # 现在可以安全地使用特定版本的 diffusers
+        import diffusers
+        print("________________", diffusers.__file__)
     args = get_function_args()
     grid_sizeH = editing_config["grid_sizeH"]
     grid_sizeW = editing_config["grid_sizeW"]
@@ -242,13 +238,11 @@ def test(
         vae.eval()
         text_encoder.eval()
         unet.eval()
-
-        
         if method=="ControlNet":
             #C/F controlnet的eval，生成深度图作为控制条件
             controlnet.eval()
             images_for_depth = rearrange(batch["images"].to(dtype=weight_dtype), "b c f h w -> (b f) c h w")
-            depth_images = P2pDDIMSpatiotempPipeline.depth_preprocess(images_for_depth)
+            depth_images = depth_preprocess(images_for_depth)
             depth_images = depth_images.to(device=accelerator.device, dtype=weight_dtype)
         elif method=="FateZero":
            #F/C
@@ -330,15 +324,48 @@ def test(
             )
     accelerator.end_training()
      
+def depth_preprocess(images):
+        """处理图像生成深度图"""
+        image_ls = []
+        for img in images:
+            if isinstance(img, torch.Tensor):
+                img = T.ToPILImage()(img)
+            image_ls.append(img)
+        # 使用本地模型路径
+        local_model_path = "/mnt/fspace/vidtome_model/models--Intel--dpt-large/snapshots/bc15f29aa3a80d532f2ed650b5e16ac48d8958f9"  # 替换为你的本地模型路径
+        # 尝试使用本地模型
+        depth_estimator = transformers.pipeline(
+            'depth-estimation', 
+            model=local_model_path,
+            local_files_only=True
+        )
+        results = depth_estimator(image_ls)
+        depth_ls = []
+        for r in results:
+            depth_ls.append(T.ToTensor()(r['depth']))
         
+        depth = torch.stack(depth_ls, dim=0)
+        depth = torch.cat([depth, depth, depth], dim=1)  # 转换为3通道
+        return depth
 
 
 @click.command()
 @click.option("--config", type=str, default="config/sample.yml")
 def run(config):
+    # 首先读取配置获取 method
     Omegadict = OmegaConf.load(config)
-    if 'unet' in os.listdir(Omegadict['pretrained_model_path']):
-        test(config=config, **Omegadict)
+    method = Omegadict.get('method')
+    
+    if not method:
+        raise ValueError("Method parameter is required in config")
+    
+    # 使用上下文管理器运行测试
+    with diffusers_context(method):
+        # 重新加载配置以确保一致性
+        Omegadict = OmegaConf.load(config)
+        
+        if 'unet' in os.listdir(Omegadict['pretrained_model_path']):
+            test(config=config, **Omegadict)
 
 
 if __name__ == "__main__":
