@@ -104,8 +104,6 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         latents_grid = torch.cat(encoded_batches, dim=0)
         return latents_grid
     
-    
-
     @torch.no_grad()
     def prepare_latents_ddim_inverted(self, image, batch_size,num_images_per_prompt, 
                                         text_embeddings,
@@ -167,7 +165,9 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                 #C/F controlnet的unet结构缝合
                 latent_grid = latent_grid.squeeze(2)
                 latent_grid = latent_grid.to(self.controlnet.dtype)
+                control_image=control_image.to(self.controlnet.dtype)
                 controlnet_cond = control_image[:, :, i, :, :] if control_image.dim() == 5 else control_image
+                
                 down_block_res_samples, mid_block_res_sample = self.controlnet(
                     latent_grid,
                     t,
@@ -204,12 +204,14 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
             torch.save(latent, os.path.join(
                         self.latents_path, f'{i}.pt'))  
             time_end=time.time()
-            if self.method=="FateZero":
-                #F/Ccontrolnet暂时不涉及alternate，后续需要维护这部分代码
-                if torch.cuda.device_count()>1:
-                    latent,indices= self.alternate_multiGPU(latent,i)
-                else:
-                    latent,indices= self.alternate(latent,i)
+            
+            #F/Ccontrolnet暂时不涉及alternate，后续需要维护这部分代码
+            # if torch.cuda.device_count()>1:
+            #     latent,indices= self.alternate_multiGPU(latent,i)
+            #     if self.method=="ControlNet" :
+            #         control_image,_=self.alternate_multiGPU(control_image,i)
+            # else:
+            #     latent,indices= self.alternate(latent,i)
 
             if self.method=="FateZero":
                 b_indices=self.reassign_values(indices, self.grid_sizeH,self.grid_sizeW)
@@ -337,11 +339,12 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         latents=latents[:, :, sqc, :, :]
         latents=grid.combine_frames_in_grid(latents,self.grid_sizeH,self.grid_sizeW)
         return latents,indicate
+    
     def alternate_multiGPU(self, latents, flag):
         org = list(range(self.video_length))
         alt = org[self.grid_sizeH:] + org[:self.grid_sizeH]
         rank = dist.get_rank()
-        device = latents.device  # 确保设备一致
+        device = self.accelerator.device  # 确保设备一致
         
         # if self.video_length == self.grid_sizeH *self.grid_sizeW:
         #     indicate = org
@@ -470,13 +473,14 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
             control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=2)
             control_image = grid.combine_frames_in_grid(control_image, self.grid_sizeH, self.grid_sizeW)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(tqdm(timesteps)):
-                if self.method =="FateZero":
-                    #C/F
-                    if torch.cuda.device_count()>1:
-                        latents,indices= self.alternate_multiGPU(latents,i)
-                    else:
-                        latents,indices= self.alternate(latents,i)
+            for i, t in enumerate(tqdm(timesteps)):   
+                #C/F
+                # if torch.cuda.device_count()>1:
+                #     latents,indices= self.alternate_multiGPU(latents,i)
+                #     if self.method =="ControlNet" :
+                #         control_image,_= self.alternate_multiGPU(control_image,i)
+                # else:
+                #     latents,indices= self.alternate(latents,i)
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
@@ -495,6 +499,8 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                     if self.method =="ControlNet":
                         #C/F
                         latent_grid_in_unet = latent_grid_in_unet.squeeze(2)
+                        latent_grid_in_unet=latent_grid_in_unet.to(self.controlnet.dtype)
+                        control_image=control_image.to(self.controlnet.dtype)
                         controlnet_cond = None
                         if control_image is not None:
                             controlnet_cond = control_image[:, :, j, :, :] if control_image.dim() == 5 else control_image
