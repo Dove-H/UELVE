@@ -48,7 +48,7 @@ class P2pSampleLogger:
         self.sample_seeds = sample_seeds
         
         self.logdir = os.path.join(logdir, subdir)
-        os.makedirs(self.logdir)
+        os.makedirs(self.logdir, exist_ok=True)
         self.annotate = annotate
         self.annotate_size = annotate_size
         self.make_grid = use_make_grid

@@ -1,16 +1,18 @@
 import os
 import sys
 from glob import glob
-from typing import Optional,Dict
+from typing import Optional, Dict
 from omegaconf import OmegaConf
 import click
 import torch.distributed as dist
 import torch
 import torch.utils.data
+import PIL
+import grid
 from PIL import Image
 from accelerate import Accelerator
 import warnings
-from contextlib import contextmanager  # 添加这行导入
+from contextlib import contextmanager
 warnings.filterwarnings("ignore", message="Failed to load image Python extension")
 from transformers import AutoTokenizer, CLIPTextModel
 from einops import rearrange
@@ -20,6 +22,11 @@ from video_diffusion.data.dataset import ImageSequenceDataset
 from video_diffusion.common.util import get_time_string, get_function_args
 from video_diffusion.common.instantiate_from_config import instantiate_from_config
 from video_diffusion.pipelines.p2p_validation_loop import P2pSampleLogger
+import numpy as np
+import utils.preprocesser_utils as pu
+import utils.image_process_utils as ipu
+import utils.feature_utils as fu
+
 
 # diffusers 路径管理函数
 def setup_diffusers_path(method):
@@ -33,7 +40,6 @@ def setup_diffusers_path(method):
     if local_diffusers_path in sys.path:
         sys.path.remove(local_diffusers_path)  
     sys.path.insert(0, local_diffusers_path)
-    #print(f"已设置 {method} 的 diffusers 路径: {local_diffusers_path}")
     return local_diffusers_path
 
 def clear_diffusers_cache():
@@ -42,12 +48,10 @@ def clear_diffusers_cache():
     for module_name in list(sys.modules.keys()):
         if (module_name.startswith('diffusers') or 
             module_name.startswith('transformers')):
-            # 确保不删除当前的 transformers 模块（如果已经导入）
             if module_name != 'transformers' and not module_name.startswith('transformers.'):
                 modules_to_remove.append(module_name)
     for module_name in modules_to_remove:
         del sys.modules[module_name]
-    #print(f"进程 {os.getpid()} 已清理 {len(modules_to_remove)} 个模块缓存")
 
 @contextmanager
 def diffusers_context(method):
@@ -58,24 +62,87 @@ def diffusers_context(method):
     try:
         yield local_diffusers_path
     finally:
-        # 可选：恢复原始路径（如果需要）
         pass
 
-def init_model(pretrained_model_path,method,grid_sizeH,grid_sizeW,model_config
-               ,test_pipeline_config,video_length,accelerator,data_path,num_inference_steps,device):
+
+
+def depth_preprocess(image_tensor, accelerator, controlnet, prepare_control_image):
+    """
+    处理输入的四维张量，转换为PIL图像列表进行深度预处理
+    image_tensor: 形状为 (batch_size * frames, channels, height, width) 的张量
+    """
+    # 将张量转换为PIL图像列表
+    image_pil_list = []
+    
+    # 遍历张量中的每个图像
+    for i in range(image_tensor.shape[0]):
+        # 获取单个图像张量 [C, H, W]
+        img_tensor = image_tensor[i]
+        
+        # 将张量从 [C, H, W] 转换为 [H, W, C]
+        if img_tensor.dim() == 3:
+            img_tensor = img_tensor.permute(1, 2, 0)
+        
+        # 转换为numpy数组并确保值范围在[0, 255]
+        if img_tensor.max() <= 1.0:
+            img_array = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
+        else:
+            img_array = img_tensor.cpu().numpy().astype(np.uint8)
+        
+        # 转换为PIL图像
+        pil_image = Image.fromarray(img_array)
+        image_pil_list.append(pil_image)
+    
+    control_torch_list = []
+    # 遍历输入的PIL图像列表
+    for image_pil in image_pil_list:
+        # 获取PIL图像的宽度和高度
+        width, height = image_pil.size
+        # 对PIL图像进行预处理，生成控制图像
+        # 将一个PIL图像转换为一系列帧并放入帧列表，grid_size=[2,2]
+        list_of_image_pils = fu.pil_grid_to_frames(image_pil, grid_size=[2,2]) # List[C, W, H] -> len = num_frames
+        # 对每个帧进行像素完美处理，处理方式由self.preprocess_name指定
+        list_of_pils = [pu.pixel_perfect_process(np.array(frame_pil, dtype='uint8'), "depth_zoe") for frame_pil in list_of_image_pils]
+        # 将处理后的帧列表转换为numpy数组
+        control_images = np.array(list_of_pils)
+        # 从numpy数组创建一个新的网格（四合一的大numpy向量），网格大小由self.grid决定
+        control_img = ipu.create_grid_from_numpy(control_images, grid_size=[2,2])
+        # 将网格转换为灰度图像
+        control_pil = PIL.Image.fromarray(control_img).convert("L")
+        # 根据控制图像、宽度和高度准备控制图像
+        control_image = prepare_control_image(
+            image=control_pil,
+            width=width,
+            height=height,
+            device=accelerator.device,
+            dtype=controlnet.dtype,
+            batch_size=1,
+            num_images_per_prompt=1
+        )
+        # 将控制图像添加到控制图像列表中
+        control_torch_list.append(control_image)
+
+    # 将控制图像列表中的torch张量按行拼接，并移动到指定设备上
+    control_torch = torch.cat(control_torch_list, dim=0).to(accelerator.device)
+    print("control_torch.shape=",control_torch.shape)
+    return control_torch
+
+def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_config,
+               test_pipeline_config, video_length, accelerator, data_path, num_inference_steps, device):
     
     # 动态导入 diffusers 相关模块
     import diffusers
     from diffusers import AutoencoderKL, DDIMScheduler
     from diffusers.utils.import_utils import is_xformers_available
+
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    if method=="FateZero":
-        #F/C FateZero的模型初始化
+    if method == "FateZero":
+        # FateZero的模型初始化
         from video_diffusion.models.unet_3d_condition import UNet3DConditionModel
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_path,
@@ -92,13 +159,14 @@ def init_model(pretrained_model_path,method,grid_sizeH,grid_sizeW,model_config
         )
         unet = UNet3DConditionModel.from_2d_model(
             os.path.join(pretrained_model_path, "unet"), model_config=model_config, 
-            grid_sizeH=grid_sizeH , grid_sizeW=grid_sizeW
+            grid_sizeH=grid_sizeH, grid_sizeW=grid_sizeW
         )
-        scheduler=DDIMScheduler.from_pretrained(
-                pretrained_model_path,
-                subfolder="scheduler",
-            )
-        controlnet=None
+        scheduler = DDIMScheduler.from_pretrained(
+            pretrained_model_path,
+            subfolder="scheduler",
+        )
+        controlnet = None
+        prepare_control_image = None
         pipeline = instantiate_from_config(
             test_pipeline_config,
             vae=vae,
@@ -108,29 +176,33 @@ def init_model(pretrained_model_path,method,grid_sizeH,grid_sizeW,model_config
             scheduler=scheduler,
             controlnet=controlnet, 
             method=method,
-            disk_store= False,
+            disk_store=False,
             video_length=video_length,
             grid_sizeH=grid_sizeH,
             grid_sizeW=grid_sizeW,
             accelerator=accelerator,
-            data_path = data_path,
-            num_inference_steps = num_inference_steps
+            data_path=data_path,
+            num_inference_steps=num_inference_steps
         )
 
-    elif method=="ControlNet":
-        # C/F ControlNetModel的模型初始化
+    elif method == "ControlNet":
+        # ControlNet的模型初始化
         from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
         controlnet = ControlNetModel.from_pretrained(
-        "/mnt/fspace/vidtome_model/models--lllyasviel--control_v11f1p_sd15_depth/snapshots/539f99181d33db39cf1af2e517cd8056785f0a87/", 
-        torch_dtype=weight_dtype  # 添加这一行
-              ).to(device, weight_dtype)
-        pipeline_cn = StableDiffusionControlNetImg2ImgPipeline.from_pretrained("/mnt/fspace/hproject/model/stable-diffusion-v1-5", controlnet=controlnet, torch_dtype= weight_dtype).to(device,  weight_dtype)
-    
-        vae=pipeline_cn.vae
-        unet=pipeline_cn.unet
-        text_encoder=pipeline_cn.text_encoder
-        scheduler=pipeline_cn.scheduler
-        tokenizer=pipeline_cn.tokenizer
+            "lllyasviel/control_v11f1p_sd15_depth", 
+            torch_dtype=weight_dtype
+        ).to(device, weight_dtype)
+        pipeline_cn = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
+            "/mnt/fspace/hproject/model/stable-diffusion-v1-5", 
+            controlnet=controlnet, 
+            torch_dtype=weight_dtype
+        ).to(device, weight_dtype)
+        prepare_control_image = pipeline_cn.prepare_control_image
+        vae = pipeline_cn.vae
+        unet = pipeline_cn.unet
+        text_encoder = pipeline_cn.text_encoder
+        scheduler = pipeline_cn.scheduler
+        tokenizer = pipeline_cn.tokenizer
         pipeline_cn.set_progress_bar_config(disable=True)
 
         pipeline = instantiate_from_config(
@@ -142,13 +214,13 @@ def init_model(pretrained_model_path,method,grid_sizeH,grid_sizeW,model_config
             scheduler=scheduler,
             controlnet=controlnet, 
             method=method,
-            disk_store= False,
+            disk_store=False,
             video_length=video_length,
             grid_sizeH=grid_sizeH,
             grid_sizeW=grid_sizeW,
             accelerator=accelerator,
-            data_path = data_path,
-            num_inference_steps = num_inference_steps
+            data_path=data_path,
+            num_inference_steps=num_inference_steps
         )
     
     vae.requires_grad_(False)
@@ -164,12 +236,12 @@ def init_model(pretrained_model_path,method,grid_sizeH,grid_sizeW,model_config
         except Exception as e:
             print("xformers加载异常")  
 
-    return pipeline,unet,vae,text_encoder,tokenizer,weight_dtype,controlnet 
+    return pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image
 
 def test(
     config: str,
     pretrained_model_path: str,
-    method:str,
+    method: str,
     dataset_config: Dict,
     logdir: str = None,
     editing_config: Optional[Dict] = None,
@@ -178,35 +250,40 @@ def test(
     seed: Optional[int] = None,
     mixed_precision: Optional[str] = "fp16",
     batch_size: int = 1,
-    model_config: dict={},
-    verbose: bool=True,
+    model_config: dict = {},
+    verbose: bool = True,
     **kwargs
 ):
     # 使用上下文管理器设置 diffusers 环境
     with diffusers_context(method):
-        # 现在可以安全地使用特定版本的 diffusers
         import diffusers
         print("________________", diffusers.__file__)
+    
     args = get_function_args()
     grid_sizeH = editing_config["grid_sizeH"]
     grid_sizeW = editing_config["grid_sizeW"]
-    controlnet_conditioning_scale=1.0
+    controlnet_conditioning_scale = 1.0
     video_length = dataset_config["n_sample_frame"]
     time_string = get_time_string()
+    
     if logdir is None:
         logdir = config.replace('config', 'result').replace('.yml', '').replace('.yaml', '')
     logdir += f"_{time_string}"
+    
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision=mixed_precision,
     )
+    
     if accelerator.is_main_process:
         os.makedirs(logdir, exist_ok=True)
         OmegaConf.save(args, os.path.join(logdir, "config.yml"))
     
-    pipeline,unet,vae,text_encoder,tokenizer,weight_dtype,controlnet=init_model(pretrained_model_path,method,grid_sizeH,grid_sizeW,model_config
-               ,test_pipeline_config,video_length,accelerator,dataset_config["path"],
-               editing_config['num_inference_steps'],accelerator.device)
+    pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image = init_model(
+        pretrained_model_path, method, grid_sizeH, grid_sizeW, model_config,
+        test_pipeline_config, video_length, accelerator, dataset_config["path"],
+        editing_config['num_inference_steps'], accelerator.device
+    )
 
     prompt_ids = tokenizer(
         dataset_config["prompt"],
@@ -216,138 +293,123 @@ def test(
         return_tensors="pt",
     ).input_ids
 
-    video_dataset = ImageSequenceDataset(**dataset_config, prompt_ids=prompt_ids,GPU_num=torch.cuda.device_count())
+    video_dataset = ImageSequenceDataset(**dataset_config, prompt_ids=prompt_ids, GPU_num=torch.cuda.device_count())
     train_dataloader = torch.utils.data.DataLoader(
         video_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=8,
-        
     )
-    unet, train_dataloader = accelerator.prepare(
-        unet, train_dataloader
-    )
+    
+    unet, train_dataloader = accelerator.prepare(unet, train_dataloader)
+    
     if accelerator.is_main_process:
         accelerator.init_trackers("video")  
 
-    validation_sample_logger = P2pSampleLogger(**editing_config, logdir=logdir, source_prompt=dataset_config['prompt'],controlnet_conditioning_scale=controlnet_conditioning_scale)
+    validation_sample_logger = P2pSampleLogger(
+        **editing_config, 
+        logdir=logdir, 
+        source_prompt=dataset_config['prompt'],
+        controlnet_conditioning_scale=controlnet_conditioning_scale
+    )
    
     for step, batch in enumerate(train_dataloader):
         assert batch["images"].shape[0] == 1, "Only support, overfiting on a single video"
-        print("batch['images'].shape=",batch['images'].shape)
+        print("batch['images'].shape=", batch['images'].shape)
+        
         vae.eval()
         text_encoder.eval()
         unet.eval()
-        if method=="ControlNet":
-            #C/F controlnet的eval，生成深度图作为控制条件
-            controlnet.eval()
-            images_for_depth = rearrange(batch["images"].to(dtype=weight_dtype), "b c f h w -> (b f) c h w")
-            depth_images = depth_preprocess(images_for_depth)
+        
+        if method == "ControlNet":
+            # ControlNet: 生成深度图作为控制条件
+            images=batch["images"]
+            images=grid.combine_frames_in_grid(images,grid_sizeH,grid_sizeW)
+            images_for_depth = rearrange(images.to(dtype=weight_dtype), "b c f h w -> (b f) c h w")
+            depth_images = depth_preprocess(images_for_depth,accelerator,controlnet,prepare_control_image)
+            depth_images=rearrange(depth_images,"(b f) c h w -> b c f h w", f=1)
+            depth_images=grid.restore_frames_from_grid(depth_images,grid_sizeH,grid_sizeW)
+            depth_images=rearrange(depth_images,"b c f h w -> (b f) c h w")
             depth_images = depth_images.to(device=accelerator.device, dtype=weight_dtype)
-        elif method=="FateZero":
-           #F/C
-            depth_images=None
+        elif method == "FateZero":
+            # FateZero: 不需要深度图
+            depth_images = None
         
         text_embeddings = pipeline._encode_prompt(
-                dataset_config.prompt,
-                device = accelerator.device,
-                num_images_per_prompt = 1,
-                do_classifier_free_guidance = True,
-                negative_prompt=None
+            dataset_config.prompt,
+            device=accelerator.device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=True,
+            negative_prompt=None
         )
-        use_inversion_attention =  editing_config.get('use_inversion_attention', False)
+        
+        use_inversion_attention = editing_config.get('use_inversion_attention', False)
         controlnet_conditioning_scale = 1.0
-        batch['ddim_init_latents']  = pipeline.prepare_latents_ddim_inverted(
+        
+        batch['ddim_init_latents'] = pipeline.prepare_latents_ddim_inverted(
             rearrange(batch["images"].to(dtype=weight_dtype), "b c f h w -> (b f) c h w"),
-            batch_size = 1,
-            num_images_per_prompt = 1,  # not sure how to use it
-            text_embeddings = text_embeddings,
-            prompt = dataset_config.prompt,
+            batch_size=1,
+            num_images_per_prompt=1,
+            text_embeddings=text_embeddings,
+            prompt=dataset_config.prompt,
             store_attention=use_inversion_attention,
-            LOW_RESOURCE = True, # not classifier-free guidance
-            save_path = logdir if verbose else None,
+            LOW_RESOURCE=True,
+            save_path=logdir if verbose else None,
             controlnet_conditioning_scale=controlnet_conditioning_scale,
             control_image=depth_images,  # 传入深度图作为控制条件
-            )
+        )
         
         vae.eval()
         text_encoder.eval()
         unet.eval()
-        #controlnet.eval()
+        
         images = batch["images"].to(dtype=weight_dtype)
         images = rearrange(images, "b c f h w -> (b f) c h w")
 
         if accelerator is not None:
             validation_sample_logger.log_sample_images(
-                image=images, # torch.Size([8, 3, 512, 512])
+                image=images,
                 pipeline=pipeline,
                 device=accelerator.device,
                 step=0,
-                latents = batch['ddim_init_latents'],
-                save_dir = logdir if verbose else None,
+                latents=batch['ddim_init_latents'],
+                save_dir=logdir if verbose else None,
                 control_image=depth_images,  # 传入控制图像
             )
 
-    if torch.cuda.device_count()>1:
-   
+    if torch.cuda.device_count() > 1:
         dist.barrier()
         rank = dist.get_rank()
-        if rank==0:
+        if rank == 0:
             gif1 = Image.open(f"{logdir}/sample/step_0_GPU0.gif")
             gif2 = Image.open(f"{logdir}/sample/step_0_GPU1.gif")
-            # 提取两个 GIF 的所有帧
+            
             frames1 = []
             frames2 = []
             try:
                 while True:
                     frames1.append(gif1.copy())
-                    gif1.seek(len(frames1))  # 移动到下一帧
+                    gif1.seek(len(frames1))
             except EOFError:
                 pass
             try:
                 while True:
                     frames2.append(gif2.copy())
-                    gif2.seek(len(frames2))  # 移动到下一帧
+                    gif2.seek(len(frames2))
             except EOFError:
                 pass
 
-            # 合并帧
             combined_frames = frames1 + frames2
-            output_path=f"{logdir}/sample/step1.gif"
-            # 保存为新的 GIF
+            output_path = f"{logdir}/sample/step1.gif"
             combined_frames[0].save(
                 output_path,
                 save_all=True,
                 append_images=combined_frames[1:],
-                loop=0,  # 无限循环
-                duration=gif1.info['duration']  # 使用第一个 GIF 的帧延迟
+                loop=0,
+                duration=gif1.info['duration']
             )
+    
     accelerator.end_training()
-     
-def depth_preprocess(images):
-        """处理图像生成深度图"""
-        image_ls = []
-        for img in images:
-            if isinstance(img, torch.Tensor):
-                img = T.ToPILImage()(img)
-            image_ls.append(img)
-        # 使用本地模型路径
-        local_model_path = "/mnt/fspace/vidtome_model/models--Intel--dpt-large/snapshots/bc15f29aa3a80d532f2ed650b5e16ac48d8958f9"  # 替换为你的本地模型路径
-        # 尝试使用本地模型
-        depth_estimator = transformers.pipeline(
-            'depth-estimation', 
-            model=local_model_path,
-            local_files_only=True
-        )
-        results = depth_estimator(image_ls)
-        depth_ls = []
-        for r in results:
-            depth_ls.append(T.ToTensor()(r['depth']))
-        
-        depth = torch.stack(depth_ls, dim=0)
-        depth = torch.cat([depth, depth, depth], dim=1)  # 转换为3通道
-        return depth
-
 
 @click.command()
 @click.option("--config", type=str, default="config/sample.yml")
@@ -366,7 +428,6 @@ def run(config):
         
         if 'unet' in os.listdir(Omegadict['pretrained_model_path']):
             test(config=config, **Omegadict)
-
 
 if __name__ == "__main__":
     run()

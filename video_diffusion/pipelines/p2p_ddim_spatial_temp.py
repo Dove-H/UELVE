@@ -205,13 +205,13 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                         self.latents_path, f'{i}.pt'))  
             time_end=time.time()
             
-            #F/Ccontrolnet暂时不涉及alternate，后续需要维护这部分代码
-            # if torch.cuda.device_count()>1:
-            #     latent,indices= self.alternate_multiGPU(latent,i)
-            #     if self.method=="ControlNet" :
-            #         control_image,_=self.alternate_multiGPU(control_image,i)
-            # else:
-            #     latent,indices= self.alternate(latent,i)
+           
+            if torch.cuda.device_count()>1:
+                latent,indices= self.alternate_multiGPU(latent,i)
+                if self.method=="ControlNet" :
+                    control_image,_=self.alternate_multiGPU(control_image,i)
+            else:
+                latent,indices= self.alternate(latent,i)
 
             if self.method=="FateZero":
                 b_indices=self.reassign_values(indices, self.grid_sizeH,self.grid_sizeW)
@@ -475,12 +475,12 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(tqdm(timesteps)):   
                 #C/F
-                # if torch.cuda.device_count()>1:
-                #     latents,indices= self.alternate_multiGPU(latents,i)
-                #     if self.method =="ControlNet" :
-                #         control_image,_= self.alternate_multiGPU(control_image,i)
-                # else:
-                #     latents,indices= self.alternate(latents,i)
+                if torch.cuda.device_count()>1:
+                    latents,indices= self.alternate_multiGPU(latents,i)
+                    if self.method =="ControlNet" :
+                        control_image,_= self.alternate_multiGPU(control_image,i)
+                else:
+                    latents,indices= self.alternate(latents,i)
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)

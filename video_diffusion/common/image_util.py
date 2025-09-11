@@ -93,15 +93,41 @@ def save_images_as_gif(
 def save_images_as_mp4(
     images: Sequence[Image.Image],
     save_path: str,
+    fps=10
 ) -> None:
-
-    writer_edit = imageio.get_writer(
-        save_path,
-        fps=10)
-    for i in images:
-        init_image = i.convert("RGB")
-        writer_edit.append_data(np.array(init_image))
-    writer_edit.close()
+    
+    # 确保文件扩展名是 .mp4
+    if not save_path.lower().endswith('.mp4'):
+        save_path += '.mp4'
+    
+    # 将PIL图像转换为numpy数组 (BGR格式用于OpenCV)
+    if isinstance(images[0], Image.Image):
+        images = [np.array(img.convert("RGB"))[:, :, ::-1] for img in images]  # RGB to BGR
+    
+    try:
+        # 使用OpenCV保存视频
+        height, width = images[0].shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(save_path, fourcc, fps, (width, height))
+        
+        for image in images:
+            out.write(image)
+        out.release()
+        
+    except Exception as e:
+        print(f"OpenCV method failed: {e}, falling back to imageio...")
+        
+        # 回退到imageio
+        try:
+            # 转换回RGB格式
+            images_rgb = [img[:, :, ::-1] for img in images]  # BGR to RGB
+            with imageio.get_writer(save_path, fps=fps) as writer:
+                for image in images_rgb:
+                    writer.append_data(image)
+        except Exception as e2:
+            print(f"All video methods failed: {e2}, saving as GIF...")
+            gif_path = save_path.replace('.mp4', '.gif')
+            save_images_as_gif([Image.fromarray(img[:, :, ::-1]) for img in images], gif_path, duration=1000//fps)
 
 
 
@@ -154,16 +180,20 @@ def log_train_reg_samples(
     save_gif_mp4_folder_type(train_samples, save_path)
 
 
-def save_gif_mp4_folder_type(images, save_path, save_gif=True):
+def save_gif_mp4_folder_type(images, save_path, save_gif=True, fps=10):  # 添加fps参数
 
     if isinstance(images[0], np.ndarray):
         images = [Image.fromarray(i) for i in images]
     elif isinstance(images[0], torch.Tensor):
         images = [transforms.ToPILImage()(i.cpu().clone()[0]) for i in images]
+    
     save_path_mp4 = save_path.replace('gif', 'mp4')
     save_path_folder = save_path.replace('.gif', '')
-    if save_gif: save_images_as_gif(images, save_path)
-    save_images_as_mp4(images, save_path_mp4)
+    
+    if save_gif: 
+        save_images_as_gif(images, save_path)
+    
+    save_images_as_mp4(images, save_path_mp4, fps=fps)  # 传递fps参数
     save_images_as_folder(images, save_path_folder)
 
 # copy from video_diffusion/pipelines/stable_diffusion.py
