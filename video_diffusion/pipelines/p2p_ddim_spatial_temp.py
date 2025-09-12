@@ -65,10 +65,12 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         self.accelerator=accelerator
         self.video_length=video_length//torch.cuda.device_count()
         device = accelerator.device
-        GPU_id=dist.get_rank()
+        
         self.num_inference_steps=num_inference_steps
-        self.attention_path = os.path.join('Attentions', str(GPU_id), os.path.basename(data_path),str(self.video_length))
-        self.latents_path = os.path.join('Latents', str(GPU_id), os.path.basename(data_path),str(self.video_length))
+        if method=="FateZero":
+            GPU_id=dist.get_rank()
+            self.attention_path = os.path.join('Attentions', str(GPU_id), os.path.basename(data_path),str(self.video_length))
+            self.latents_path = os.path.join('Latents', str(GPU_id), os.path.basename(data_path),str(self.video_length))
         # 初始化分布式环境
         
     r"""
@@ -136,8 +138,9 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         init_latents = 0.18215 * init_latents
         init_latents = torch.cat([init_latents], dim=0)
         init_latents_bcfhw = rearrange(init_latents, "(b f) c h w -> b c f h w", b=batch_size)
-        os.makedirs(self.latents_path, exist_ok = True)
-        os.makedirs(self.attention_path, exist_ok = True)
+        if self.method=="FateZero":
+            os.makedirs(self.latents_path, exist_ok = True)
+            os.makedirs(self.attention_path, exist_ok = True)
         if self.method=="ControlNet":
             #C/F control_image需要匹配网格的数据格式
             control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=batch_size)
@@ -194,6 +197,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         uncond_embeddings, cond_embeddings = text_embeddings.chunk(2)
         latent = latent.clone().detach()
         print('Invert clean image to noise latents by DDIM and Unet')
+        #self.scheduler.timesteps = torch.unique(self.scheduler.timesteps)
         for i in trange(len(self.scheduler.timesteps)):
             
             t = self.scheduler.timesteps[len(self.scheduler.timesteps) - i - 1]
@@ -201,18 +205,22 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                 t = torch.tensor(t, device=latent.device)
             t = t.long()
             time_start=time.time()
-            torch.save(latent, os.path.join(
-                        self.latents_path, f'{i}.pt'))  
+            if self.method=="FateZero":
+                torch.save(latent, os.path.join(
+                            self.latents_path, f'{i}.pt'))  
             time_end=time.time()
             
            
             if torch.cuda.device_count()>1:
-                latent,indices= self.alternate_multiGPU(latent,i)
-                if self.method=="ControlNet" :
-                    control_image,_=self.alternate_multiGPU(control_image,i)
+                ab=0
+                # latent,indices= self.alternate_multiGPU(latent,i)
+                # if self.method=="ControlNet" :
+                #     control_image,_=self.alternate_multiGPU(control_image,i)
             else:
-                latent,indices= self.alternate(latent,i)
-
+                ab=0
+                # latent,indices= self.alternate(latent,i)
+                # if self.method=="ControlNet" :
+                #                     control_image,_=self.alternate(control_image,i)
             if self.method=="FateZero":
                 b_indices=self.reassign_values(indices, self.grid_sizeH,self.grid_sizeW)
             elif self.method=="ControlNet":
@@ -455,6 +463,8 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         
         # 4. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
+        
+        #self.scheduler.timesteps = torch.unique(self.scheduler.timesteps)
         timesteps = self.scheduler.timesteps
         # 5. Prepare control image
         if control_image is not None:
@@ -476,11 +486,15 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
             for i, t in enumerate(tqdm(timesteps)):   
                 #C/F
                 if torch.cuda.device_count()>1:
-                    latents,indices= self.alternate_multiGPU(latents,i)
-                    if self.method =="ControlNet" :
-                        control_image,_= self.alternate_multiGPU(control_image,i)
+                    sb=0
+                    # latents,indices= self.alternate_multiGPU(latents,i)
+                    # if self.method =="ControlNet" :
+                    #     control_image,_= self.alternate_multiGPU(control_image,i)
                 else:
-                    latents,indices= self.alternate(latents,i)
+                    sb=0
+                    # latents,indices= self.alternate(latents,i)
+                    # if self.method =="ControlNet" :
+                    #     control_image,_= self.alternate(control_image,i)
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
