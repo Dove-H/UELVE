@@ -14,14 +14,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers.utils import deprecate, logging
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.models import AutoencoderKL
-from diffusers.schedulers import (
-    DDIMScheduler,
-    DPMSolverMultistepScheduler,
-    EulerAncestralDiscreteScheduler,
-    EulerDiscreteScheduler,
-    LMSDiscreteScheduler,
-    PNDMScheduler,
-)
+from diffusers.schedulers import (DDIMScheduler)
 from .stable_diffusion import SpatiotempStableDiffusionPipeline
 from video_diffusion.prompt_attention import attention_util
 import torchvision.transforms as T
@@ -36,7 +29,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
         unet,
-        scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler, EulerDiscreteScheduler, EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler,],
+        scheduler: Union[DDIMScheduler],
         controlnet, 
         method:str,
         disk_store: bool=False,
@@ -77,26 +70,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
     Pipeline for text-to-video generation using Spatio-temp Stable Diffusion.
     """
 
-    def check_inputs(self, prompt, height, width, callback_steps, strength=None):
-        if not isinstance(prompt, str) and not isinstance(prompt, list):
-            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
-        if strength is not None:
-            if strength <= 0 or strength > 1:
-                raise ValueError(f"The value of strength should in (0.0, 1.0] but is {strength}")
-
-        if height % 8 != 0 or width % 8 != 0:
-            raise ValueError(
-                f"`height` and `width` have to be divisible by 8 but are {height} and {width}."
-            )
-
-        if (callback_steps is None) or (
-            callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
-        ):
-            raise ValueError(
-                f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
-                f" {type(callback_steps)}."
-            )
-    
+ 
     def encode_in_f_batches(self,image_grid, model):
         batches = torch.split(image_grid,1, dim=0)  # 分批
         encoded_batches = []
@@ -115,10 +89,16 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                                         save_path = None,
                                         controlnet_conditioning_scale=1.0,
                                         control_image=None,
+                                        scheduler_config=None
                                       ):
  
         self.prepare_before_train_loop()
         #F/C controller初始化
+        self.scheduler_config=scheduler_config
+        self.inverse_scheduler = DDIMScheduler.from_config(self.scheduler_config)  # 从配置中创建DDIMScheduler对象
+        self.inverse_scheduler.set_timesteps(self.num_inference_steps, device=self.device)  # 设置时间步长
+        self.timesteps = reversed(self.inverse_scheduler.timesteps)  # 获取倒序的时间步长
+        print(self.timesteps)
         if self.method=="FateZero":
             if store_attention:
                 attention_util.register_attention_control(self, self.store_controller)
@@ -198,29 +178,22 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         latent = latent.clone().detach()
         print('Invert clean image to noise latents by DDIM and Unet')
         #self.scheduler.timesteps = torch.unique(self.scheduler.timesteps)
-        for i in trange(len(self.scheduler.timesteps)):
+        
+        for i, t in enumerate(tqdm(self.timesteps)):  # 遍历时间步长
             
-            t = self.scheduler.timesteps[len(self.scheduler.timesteps) - i - 1]
-            if not isinstance(t, torch.Tensor):
-                t = torch.tensor(t, device=latent.device)
-            t = t.long()
-            time_start=time.time()
+         
+           
             if self.method=="FateZero":
                 torch.save(latent, os.path.join(
                             self.latents_path, f'{i}.pt'))  
-            time_end=time.time()
-            
-           
             if torch.cuda.device_count()>1:
-                ab=0
-                # latent,indices= self.alternate_multiGPU(latent,i)
-                # if self.method=="ControlNet" :
-                #     control_image,_=self.alternate_multiGPU(control_image,i)
-            else:
-                ab=0
-                # latent,indices= self.alternate(latent,i)
-                # if self.method=="ControlNet" :
-                #                     control_image,_=self.alternate(control_image,i)
+                latent,indices= self.alternate_multiGPU(latent,i)
+                if self.method=="ControlNet" :
+                    control_image,_=self.alternate_multiGPU(control_image,i)
+            else:  
+                latent,indices= self.alternate(latent,i)
+                if self.method=="ControlNet" :
+                                    control_image,_=self.alternate(control_image,i)
             if self.method=="FateZero":
                 b_indices=self.reassign_values(indices, self.grid_sizeH,self.grid_sizeW)
             elif self.method=="ControlNet":
@@ -448,9 +421,6 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         height = height or self.unet.config.sample_size * self.vae_scale_factor
         width = width or self.unet.config.sample_size * self.vae_scale_factor
 
-        # 1. Check inputs. Raise error if not correct
-        self.check_inputs(prompt, height, width, callback_steps, strength)
-
         # 2. Define call parameters
         batch_size = 1 if isinstance(prompt, str) else len(prompt)
         device = self._execution_device
@@ -462,6 +432,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         )
         
         # 4. Prepare timesteps
+        self.scheduler = DDIMScheduler.from_config(self.scheduler_config)
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         
         #self.scheduler.timesteps = torch.unique(self.scheduler.timesteps)
@@ -483,18 +454,16 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
             control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=2)
             control_image = grid.combine_frames_in_grid(control_image, self.grid_sizeH, self.grid_sizeW)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(tqdm(timesteps)):   
+            for i, t in tqdm(enumerate(self.scheduler.timesteps), desc='reverse_diffusion'):
                 #C/F
                 if torch.cuda.device_count()>1:
-                    sb=0
-                    # latents,indices= self.alternate_multiGPU(latents,i)
-                    # if self.method =="ControlNet" :
-                    #     control_image,_= self.alternate_multiGPU(control_image,i)
+                    latents,indices= self.alternate_multiGPU(latents,i)
+                    if self.method =="ControlNet" :
+                        control_image,_= self.alternate_multiGPU(control_image,i)
                 else:
-                    sb=0
-                    # latents,indices= self.alternate(latents,i)
-                    # if self.method =="ControlNet" :
-                    #     control_image,_= self.alternate(control_image,i)
+                    latents,indices= self.alternate(latents,i)
+                    if self.method =="ControlNet" :
+                        control_image,_= self.alternate(control_image,i)
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)

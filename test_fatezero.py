@@ -18,6 +18,7 @@ from transformers import AutoTokenizer, CLIPTextModel
 from einops import rearrange
 import torchvision.transforms as T
 import transformers
+
 from video_diffusion.data.dataset import ImageSequenceDataset
 from video_diffusion.common.util import get_time_string, get_function_args
 from video_diffusion.common.instantiate_from_config import instantiate_from_config
@@ -66,65 +67,69 @@ def diffusers_context(method):
 
 
 
-def depth_preprocess(image_tensor, accelerator, controlnet, prepare_control_image):
+def depth_preprocess(image_tensor, accelerator, controlnet, prepare_control_image,Control_image_path):
     """
     处理输入的四维张量，转换为PIL图像列表进行深度预处理
     image_tensor: 形状为 (batch_size * frames, channels, height, width) 的张量
     """
-    # 将张量转换为PIL图像列表
-    image_pil_list = []
-    
-    # 遍历张量中的每个图像
-    for i in range(image_tensor.shape[0]):
-        # 获取单个图像张量 [C, H, W]
-        img_tensor = image_tensor[i]
+    if len(os.listdir(Control_image_path)) > 0:
+                control_torch = torch.load(os.path.join(Control_image_path, 'control.pt')).to(accelerator.device)
+    else:
+        # 将张量转换为PIL图像列表
+        image_pil_list = []
         
-        # 将张量从 [C, H, W] 转换为 [H, W, C]
-        if img_tensor.dim() == 3:
-            img_tensor = img_tensor.permute(1, 2, 0)
+        # 遍历张量中的每个图像
+        for i in range(image_tensor.shape[0]):
+            # 获取单个图像张量 [C, H, W]
+            img_tensor = image_tensor[i]
+            
+            # 将张量从 [C, H, W] 转换为 [H, W, C]
+            if img_tensor.dim() == 3:
+                img_tensor = img_tensor.permute(1, 2, 0)
+            
+            # 转换为numpy数组并确保值范围在[0, 255]
+            if img_tensor.max() <= 1.0:
+                img_array = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
+            else:
+                img_array = img_tensor.cpu().numpy().astype(np.uint8)
+            
+            # 转换为PIL图像
+            pil_image = Image.fromarray(img_array)
+            image_pil_list.append(pil_image)
         
-        # 转换为numpy数组并确保值范围在[0, 255]
-        if img_tensor.max() <= 1.0:
-            img_array = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
-        else:
-            img_array = img_tensor.cpu().numpy().astype(np.uint8)
-        
-        # 转换为PIL图像
-        pil_image = Image.fromarray(img_array)
-        image_pil_list.append(pil_image)
-    
-    control_torch_list = []
-    # 遍历输入的PIL图像列表
-    for image_pil in image_pil_list:
-        # 获取PIL图像的宽度和高度
-        width, height = image_pil.size
-        # 对PIL图像进行预处理，生成控制图像
-        # 将一个PIL图像转换为一系列帧并放入帧列表，grid_size=[2,2]
-        list_of_image_pils = fu.pil_grid_to_frames(image_pil, grid_size=[2,2]) # List[C, W, H] -> len = num_frames
-        # 对每个帧进行像素完美处理，处理方式由self.preprocess_name指定
-        list_of_pils = [pu.pixel_perfect_process(np.array(frame_pil, dtype='uint8'), "depth_zoe") for frame_pil in list_of_image_pils]
-        # 将处理后的帧列表转换为numpy数组
-        control_images = np.array(list_of_pils)
-        # 从numpy数组创建一个新的网格（四合一的大numpy向量），网格大小由self.grid决定
-        control_img = ipu.create_grid_from_numpy(control_images, grid_size=[2,2])
-        # 将网格转换为灰度图像
-        control_pil = PIL.Image.fromarray(control_img).convert("L")
-        # 根据控制图像、宽度和高度准备控制图像
-        control_image = prepare_control_image(
-            image=control_pil,
-            width=width,
-            height=height,
-            device=accelerator.device,
-            dtype=controlnet.dtype,
-            batch_size=1,
-            num_images_per_prompt=1
-        )
-        # 将控制图像添加到控制图像列表中
-        control_torch_list.append(control_image)
+        control_torch_list = []
+        # 遍历输入的PIL图像列表
+        for image_pil in image_pil_list:
+            # 获取PIL图像的宽度和高度
+            width, height = image_pil.size
+            # 对PIL图像进行预处理，生成控制图像
+            # 将一个PIL图像转换为一系列帧并放入帧列表，grid_size=[2,2]
+            list_of_image_pils = fu.pil_grid_to_frames(image_pil, grid_size=[2,2]) # List[C, W, H] -> len = num_frames
+            # 对每个帧进行像素完美处理，处理方式由self.preprocess_name指定
+            list_of_pils = [pu.pixel_perfect_process(np.array(frame_pil, dtype='uint8'), "canny") for frame_pil in list_of_image_pils]
+            # 将处理后的帧列表转换为numpy数组
+            control_images = np.array(list_of_pils)
+            # 从numpy数组创建一个新的网格（四合一的大numpy向量），网格大小由self.grid决定
+            control_img = ipu.create_grid_from_numpy(control_images, grid_size=[2,2])
+            # 将网格转换为灰度图像
+            control_pil = PIL.Image.fromarray(control_img).convert("L")
+            # 根据控制图像、宽度和高度准备控制图像
+            control_image = prepare_control_image(
+                image=control_pil,
+                width=width,
+                height=height,
+                device=accelerator.device,
+                dtype=controlnet.dtype,
+                batch_size=1,
+                num_images_per_prompt=1
+            )
+            # 将控制图像添加到控制图像列表中
+            control_torch_list.append(control_image)
 
-    # 将控制图像列表中的torch张量按行拼接，并移动到指定设备上
-    control_torch = torch.cat(control_torch_list, dim=0).to(accelerator.device)
-    print("control_torch.shape=",control_torch.shape)
+        # 将控制图像列表中的torch张量按行拼接，并移动到指定设备上
+        control_torch = torch.cat(control_torch_list, dim=0).to(accelerator.device)
+        torch.save(control_torch, os.path.join(Control_image_path, 'control.pt'))
+        print("control_torch.shape=",control_torch.shape)
     return control_torch
 
 def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_config,
@@ -167,6 +172,7 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
         )
         controlnet = None
         prepare_control_image = None
+        scheduler_config=None
         pipeline = instantiate_from_config(
             test_pipeline_config,
             vae=vae,
@@ -203,6 +209,7 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
         text_encoder = pipeline_cn.text_encoder
         scheduler = pipeline_cn.scheduler
         tokenizer = pipeline_cn.tokenizer
+        scheduler_config = pipeline_cn.scheduler.config
         pipeline_cn.set_progress_bar_config(disable=True)
 
         pipeline = instantiate_from_config(
@@ -236,7 +243,7 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
         except Exception as e:
             print("xformers加载异常")  
 
-    return pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image
+    return pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image,scheduler_config
 
 def test(
     config: str,
@@ -265,7 +272,13 @@ def test(
     controlnet_conditioning_scale = 1.0
     video_length = dataset_config["n_sample_frame"]
     time_string = get_time_string()
-    
+    GPU_num=torch.cuda.device_count()
+    if GPU_num>1:
+        dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo')
+        Control_image_path = os.path.join('Control', str(GPU_num) + "GPU",str(dist.get_rank()), os.path.basename(dataset_config["path"]),str(video_length) )
+    else:
+        Control_image_path = os.path.join('Control',str(GPU_num) + "GPU",os.path.basename(dataset_config["path"]),str(video_length)  )
+    os.makedirs(Control_image_path, exist_ok = True)
     if logdir is None:
         logdir = config.replace('config', 'result').replace('.yml', '').replace('.yaml', '')
     logdir += f"_{time_string}"
@@ -279,7 +292,7 @@ def test(
         os.makedirs(logdir, exist_ok=True)
         OmegaConf.save(args, os.path.join(logdir, "config.yml"))
     
-    pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image = init_model(
+    pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image,scheduler_config = init_model(
         pretrained_model_path, method, grid_sizeH, grid_sizeW, model_config,
         test_pipeline_config, video_length, accelerator, dataset_config["path"],
         editing_config['num_inference_steps'], accelerator.device
@@ -326,7 +339,7 @@ def test(
             images=batch["images"]
             images=grid.combine_frames_in_grid(images,grid_sizeH,grid_sizeW)
             images_for_depth = rearrange(images.to(dtype=weight_dtype), "b c f h w -> (b f) c h w")
-            depth_images = depth_preprocess(images_for_depth,accelerator,controlnet,prepare_control_image)
+            depth_images = depth_preprocess(images_for_depth,accelerator,controlnet,prepare_control_image,Control_image_path)
             depth_images=rearrange(depth_images,"(b f) c h w -> b c f h w", f=1)
             depth_images=grid.restore_frames_from_grid(depth_images,grid_sizeH,grid_sizeW)
             depth_images=rearrange(depth_images,"b c f h w -> (b f) c h w")
@@ -357,6 +370,7 @@ def test(
             save_path=logdir if verbose else None,
             controlnet_conditioning_scale=controlnet_conditioning_scale,
             control_image=depth_images,  # 传入深度图作为控制条件
+            scheduler_config=scheduler_config
         )
         
         vae.eval()
