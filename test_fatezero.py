@@ -18,7 +18,7 @@ from transformers import AutoTokenizer, CLIPTextModel
 from einops import rearrange
 import torchvision.transforms as T
 import transformers
-
+import utils.constants as const
 from video_diffusion.data.dataset import ImageSequenceDataset
 from video_diffusion.common.util import get_time_string, get_function_args
 from video_diffusion.common.instantiate_from_config import instantiate_from_config
@@ -67,7 +67,7 @@ def diffusers_context(method):
 
 
 
-def depth_preprocess(image_tensor, accelerator, controlnet, prepare_control_image,Control_image_path):
+def control_preprocess(image_tensor, accelerator, controlnet, prepare_control_image,Control_image_path,control_class):
     """
     处理输入的四维张量，转换为PIL图像列表进行深度预处理
     image_tensor: 形状为 (batch_size * frames, channels, height, width) 的张量
@@ -106,7 +106,7 @@ def depth_preprocess(image_tensor, accelerator, controlnet, prepare_control_imag
             # 将一个PIL图像转换为一系列帧并放入帧列表，grid_size=[2,2]
             list_of_image_pils = fu.pil_grid_to_frames(image_pil, grid_size=[2,2]) # List[C, W, H] -> len = num_frames
             # 对每个帧进行像素完美处理，处理方式由self.preprocess_name指定
-            list_of_pils = [pu.pixel_perfect_process(np.array(frame_pil, dtype='uint8'), "canny") for frame_pil in list_of_image_pils]
+            list_of_pils = [pu.pixel_perfect_process(np.array(frame_pil, dtype='uint8'), control_class) for frame_pil in list_of_image_pils]
             # 将处理后的帧列表转换为numpy数组
             control_images = np.array(list_of_pils)
             # 从numpy数组创建一个新的网格（四合一的大numpy向量），网格大小由self.grid决定
@@ -133,7 +133,7 @@ def depth_preprocess(image_tensor, accelerator, controlnet, prepare_control_imag
     return control_torch
 
 def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_config,
-               test_pipeline_config, video_length, accelerator, data_path, num_inference_steps, device):
+               test_pipeline_config, video_length, accelerator, data_path, num_inference_steps, device,control_class):
     
     # 动态导入 diffusers 相关模块
     import diffusers
@@ -172,7 +172,7 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
         )
         controlnet = None
         prepare_control_image = None
-        scheduler_config=None
+        scheduler_config=scheduler.config
         pipeline = instantiate_from_config(
             test_pipeline_config,
             vae=vae,
@@ -182,6 +182,7 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
             scheduler=scheduler,
             controlnet=controlnet, 
             method=method,
+            control_class=control_class,
             disk_store=False,
             video_length=video_length,
             grid_sizeH=grid_sizeH,
@@ -190,12 +191,13 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
             data_path=data_path,
             num_inference_steps=num_inference_steps
         )
-
+ 
     elif method == "ControlNet":
         # ControlNet的模型初始化
+        print("const.PREPROCESSOR_DICT[input_ns.preprocess_name]=",const.PREPROCESSOR_DICT[control_class])
         from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
         controlnet = ControlNetModel.from_pretrained(
-            "lllyasviel/control_v11f1p_sd15_depth", 
+           const.PREPROCESSOR_DICT[control_class], #depth canny lineart softedge 
             torch_dtype=weight_dtype
         ).to(device, weight_dtype)
         pipeline_cn = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
@@ -221,6 +223,7 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
             scheduler=scheduler,
             controlnet=controlnet, 
             method=method,
+            control_class=control_class,
             disk_store=False,
             video_length=video_length,
             grid_sizeH=grid_sizeH,
@@ -249,6 +252,7 @@ def test(
     config: str,
     pretrained_model_path: str,
     method: str,
+    control_class: str,
     dataset_config: Dict,
     logdir: str = None,
     editing_config: Optional[Dict] = None,
@@ -275,9 +279,9 @@ def test(
     GPU_num=torch.cuda.device_count()
     if GPU_num>1:
         dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo')
-        Control_image_path = os.path.join('Control', str(GPU_num) + "GPU",str(dist.get_rank()), os.path.basename(dataset_config["path"]),str(video_length) )
+        Control_image_path = os.path.join('Control', str(GPU_num) + "GPU",control_class,str(dist.get_rank()), os.path.basename(dataset_config["path"]),str(video_length) )
     else:
-        Control_image_path = os.path.join('Control',str(GPU_num) + "GPU",os.path.basename(dataset_config["path"]),str(video_length)  )
+        Control_image_path = os.path.join('Control',str(GPU_num) + "GPU",control_class,os.path.basename(dataset_config["path"]),str(video_length)  )
     os.makedirs(Control_image_path, exist_ok = True)
     if logdir is None:
         logdir = config.replace('config', 'result').replace('.yml', '').replace('.yaml', '')
@@ -295,8 +299,7 @@ def test(
     pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image,scheduler_config = init_model(
         pretrained_model_path, method, grid_sizeH, grid_sizeW, model_config,
         test_pipeline_config, video_length, accelerator, dataset_config["path"],
-        editing_config['num_inference_steps'], accelerator.device
-    )
+        editing_config['num_inference_steps'], accelerator.device,control_class)
 
     prompt_ids = tokenizer(
         dataset_config["prompt"],
@@ -339,8 +342,8 @@ def test(
             images=batch["images"]
             images=grid.combine_frames_in_grid(images,grid_sizeH,grid_sizeW)
             images_for_depth = rearrange(images.to(dtype=weight_dtype), "b c f h w -> (b f) c h w")
-            depth_images = depth_preprocess(images_for_depth,accelerator,controlnet,prepare_control_image,Control_image_path)
-            depth_images=rearrange(depth_images,"(b f) c h w -> b c f h w", f=1)
+            depth_images = control_preprocess(images_for_depth,accelerator,controlnet,prepare_control_image,Control_image_path,control_class)
+            depth_images=rearrange(depth_images,"(b f) c h w -> b c f h w", b=1)
             depth_images=grid.restore_frames_from_grid(depth_images,grid_sizeH,grid_sizeW)
             depth_images=rearrange(depth_images,"b c f h w -> (b f) c h w")
             depth_images = depth_images.to(device=accelerator.device, dtype=weight_dtype)

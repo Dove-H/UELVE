@@ -1,7 +1,7 @@
 import cv2  
 import os  
   
-def extract_frames(video_path, output_folder, num_frames=400, resolution=(512, 512)):  #改12帧3网格
+def extract_frames(video_path, output_folder, num_frames=40, resolution=(512, 512)):  #改12帧3网格
     # 检查输出文件夹是否存在，不存在则创建  
     if not os.path.exists(output_folder):  
         os.makedirs(output_folder)  
@@ -39,6 +39,6 @@ def extract_frames(video_path, output_folder, num_frames=400, resolution=(512, 5
     cap.release()  
   
 # 调用  
-video_path = 'data/sheep.mp4'  # 输入视频路径  
-output_folder = 'data/sheep400f'  # 输出文件夹  
+video_path = 'data/wolf.mp4'  # 输入视频路径  
+output_folder = 'data/wolf'  # 输出文件夹  
 extract_frames(video_path, output_folder)

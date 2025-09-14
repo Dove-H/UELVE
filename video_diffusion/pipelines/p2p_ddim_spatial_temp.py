@@ -32,6 +32,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         scheduler: Union[DDIMScheduler],
         controlnet, 
         method:str,
+        control_class:str,
         disk_store: bool=False,
         video_length: int=8,
         grid_sizeH: int=2,
@@ -42,6 +43,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         ):
         super().__init__(vae, text_encoder, tokenizer, unet, scheduler)
         self.method=method
+        self.control_class=control_class
         self.scheduler=scheduler
         self.controlnet = controlnet
         if method=="FateZero":
@@ -60,10 +62,17 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         device = accelerator.device
         
         self.num_inference_steps=num_inference_steps
+        GPU_num=torch.cuda.device_count()
         if method=="FateZero":
-            GPU_id=dist.get_rank()
-            self.attention_path = os.path.join('Attentions', str(GPU_id), os.path.basename(data_path),str(self.video_length))
-            self.latents_path = os.path.join('Latents', str(GPU_id), os.path.basename(data_path),str(self.video_length))
+            if GPU_num>1:
+                GPU_id=dist.get_rank()
+                self.attention_path = os.path.join('Attentions', str(GPU_num) + "GPU","GPU"+str(GPU_id), os.path.basename(data_path),str(self.video_length))
+                self.latents_path = os.path.join('Latents',str(GPU_num) + "GPU", "GPU"+str(GPU_id), os.path.basename(data_path),str(self.video_length))
+            else:
+                self.attention_path = os.path.join('Attentions', str(GPU_num) + "GPU", os.path.basename(data_path),str(self.video_length))
+                self.latents_path = os.path.join('Latents',str(GPU_num) + "GPU", os.path.basename(data_path),str(self.video_length))
+            
+
         # 初始化分布式环境
         
     r"""
