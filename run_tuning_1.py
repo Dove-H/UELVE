@@ -1,5 +1,4 @@
 # From https://github.com/showlab/Tune-A-Video/blob/main/train_tuneavideo.py
-
 import argparse
 import datetime
 import logging
@@ -7,41 +6,31 @@ import inspect
 import math
 import os
 import time
+import warnings
+warnings.filterwarnings("ignore")
 from typing import Dict, Optional, Tuple
 from omegaconf import OmegaConf
-# 修改现有的导入部分
 from diffusers import AutoencoderKL, DDPMScheduler, DDIMScheduler, DPMSolverSinglestepScheduler
 import torch
 import torch.distributed as dist
-
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import numpy as np
 import diffusers
 import transformers
-import accelerate
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-
 from video_diffusion.models_tune.unet  import UNet3DConditionModel
 from video_diffusion.data.dataset_tune import TuneAVideoDataset
-#from video_diffusion.pipelines.p2p_ddim_spatial_temp import P2pDDIMSpatiotempPipeline
-#from tuneavideo.util import save_videos_grid, ddim_inversion
 from einops import rearrange
 import grid
-
-
-
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.10.0.dev0")
-
 logger = get_logger(__name__, log_level="INFO")
 
 
@@ -68,7 +57,7 @@ def main(
     adam_epsilon: float = 1e-08,
     max_grad_norm: float = 1.0,
     gradient_accumulation_steps: int = 1,
-    gradient_checkpointing: bool = True,
+    gradient_checkpointing: bool = False,
     checkpointing_steps: int = 500,
     resume_from_checkpoint: Optional[str] = None,
     mixed_precision: Optional[str] = "fp16",
@@ -87,8 +76,6 @@ def main(
         mixed_precision=mixed_precision,
     )
   
-    
-    
     def encode_in_f_batches(image_grid, model):
         device=accelerator.device
         # 获取输入的 batch 大小
@@ -135,7 +122,6 @@ def main(
     
         return noise_pred
 
-    
     # 设置日志记录格式，并根据是否是主进程来设置不同的日志级别。
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -163,29 +149,10 @@ def main(
 
     # 加载预训练模型中的调度器、标记器和模型。
     noise_scheduler = DDPMScheduler.from_pretrained(pretrained_model_path, subfolder="scheduler")
-    # 替换原来的 DDPMScheduler
-    # noise_scheduler = DPMSolverSinglestepScheduler.from_pretrained(
-    #     pretrained_model_path, 
-    #     subfolder="scheduler",
-    #     #predictor_type="epsilon", 
-    #     algorithm_type="dpmsolver++",
-    #     solver_order=2,
-    #     use_karras_sigmas=False,
-    #     lower_order_final=True,
-    #     last_sigmas_type="zero"  # 保持为零
-    # )
-    
-
-
-
     tokenizer = CLIPTokenizer.from_pretrained(pretrained_model_path, subfolder="tokenizer")
     text_encoder = CLIPTextModel.from_pretrained(pretrained_model_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(pretrained_model_path, subfolder="vae")
-    # unet = UNet3DConditionModel.from_2d_model(
-    #     os.path.join(pretrained_model_path, "unet"), model_config=model_config,grid_size=grid_size
-    # )
     unet = UNet3DConditionModel.from_pretrained_2d(pretrained_model_path, subfolder="unet",grid_sizeH=grid_sizeH,grid_sizeW=grid_sizeW)
-
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     unet.requires_grad_(False)
@@ -208,20 +175,7 @@ def main(
         learning_rate = (
             learning_rate * gradient_accumulation_steps * train_batch_size * accelerator.num_processes
         )
-
-    # 初始化优化器
-    if use_8bit_adam:
-        try:
-            import bitsandbytes as bnb
-        except ImportError:
-            raise ImportError(
-                "Please install bitsandbytes to use 8-bit Adam. You can do so by running `pip install bitsandbytes`"
-            )
-
-        optimizer_cls = bnb.optim.AdamW8bit
-    else:
-        optimizer_cls = torch.optim.AdamW
-
+    optimizer_cls = torch.optim.AdamW
     optimizer = optimizer_cls(
         unet.parameters(),
         lr=learning_rate,
@@ -231,8 +185,6 @@ def main(
     )
 
     train_dataset = TuneAVideoDataset(**train_data,GPU_num=torch.cuda.device_count())
-   
-    
     train_dataset.prompt_ids = tokenizer(
         train_dataset.prompt, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
     ).input_ids[0]
@@ -242,16 +194,6 @@ def main(
         train_dataset, batch_size=train_batch_size,shuffle=False
     )
     ddim_inv_scheduler = DDIMScheduler.from_pretrained(pretrained_model_path, subfolder='scheduler')
-    # 替换原来的 DDIMScheduler
-    # ddim_inv_scheduler = DPMSolverSinglestepScheduler.from_pretrained(
-    #     pretrained_model_path, 
-    #     subfolder='scheduler',
-    #     algorithm_type="dpmsolver++",  # 使用改进版本
-    #     solver_order=2,  # 二阶求解
-    #     use_karras_sigmas=False,  # 使用Karras噪声计划
-    #     lower_order_final=True,  # 最后几步使用低阶求解器
-    #     last_sigmas_type="zero"  # 保持为零
-    # )
     ddim_inv_scheduler.set_timesteps(validation_data.num_inv_steps)
 
     lr_scheduler = get_scheduler(
@@ -372,14 +314,6 @@ def main(
 
     # Train!
     total_batch_size = train_batch_size * accelerator.num_processes * gradient_accumulation_steps
-
-    logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Num Epochs = {num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {max_train_steps}")
     global_step = 0
     first_epoch = 0
 
@@ -409,35 +343,21 @@ def main(
     for epoch in range(first_epoch, num_train_epochs):
         unet.train()
         train_loss = 0.0
-        startalternatetime=time.time()
         if torch.cuda.device_count()>1:
             latents= alternate_multiGPU(latents=latents,flag=epoch)
         else:
             latents=alternate(latents=latents,flag=epoch)
-        endalternatetime=time.time()
-        #print("alternate time=",endalternatetime-startalternatetime)
+
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
-                # pixel_values = batch["pixel_values"]
-                # pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
-                # pixel_values = grid.combine_frames_in_grid(pixel_values, grid_size)
-                # pixel_values = rearrange(pixel_values, "b c f h w -> b f c h w")
-                # video_length = pixel_values.shape[1]
-                # pixel_values = rearrange(pixel_values, "b f c h w -> (b f) c h w")
-                # latents = encode_in_f_batches(pixel_values, vae)
-                # latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
-                # latents = latents * 0.18215
-                # #Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
                 # Sample a random timestep for each video
-                #timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,), device=latents.device)
                 if epoch%2==1:
                    timesteps = 2 * torch.randint(0, (noise_scheduler.num_train_timesteps + 1) // 2, (bsz,), device=latents.device) + 1
                 else:
                     timesteps = 2 * torch.randint(0, (noise_scheduler.num_train_timesteps + 1) // 2, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
-                #print("timestep=",timesteps)
                 # Add noise to the latents according to the noise magnitude at each timestep
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                 # Get the text embedding for conditioning

@@ -1,5 +1,7 @@
 import os
 import sys
+import warnings
+warnings.filterwarnings("ignore")
 from glob import glob
 from typing import Optional, Dict
 from omegaconf import OmegaConf
@@ -12,6 +14,7 @@ import grid
 from PIL import Image
 from accelerate import Accelerator
 import warnings
+import deepseek
 from contextlib import contextmanager
 warnings.filterwarnings("ignore", message="Failed to load image Python extension")
 from transformers import AutoTokenizer, CLIPTextModel
@@ -149,6 +152,8 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
     if method == "FateZero":
         # FateZero的模型初始化
         from video_diffusion.models.unet_3d_condition import UNet3DConditionModel
+        if accelerator.is_main_process: 
+            print("pretrained_model_path=",pretrained_model_path)
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_path,
             subfolder="tokenizer",
@@ -194,14 +199,16 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
  
     elif method == "ControlNet":
         # ControlNet的模型初始化
-        print("const.PREPROCESSOR_DICT[input_ns.preprocess_name]=",const.PREPROCESSOR_DICT[control_class])
+        print("ControlNet Model Path",const.PREPROCESSOR_DICT[control_class])
         from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
         controlnet = ControlNetModel.from_pretrained(
            const.PREPROCESSOR_DICT[control_class], #depth canny lineart softedge 
             torch_dtype=weight_dtype
         ).to(device, weight_dtype)
+        SDModel_Path="/mnt/fspace/hproject/model/stable-diffusion-v1-5"
+        print("SDModel_Path=",SDModel_Path)
         pipeline_cn = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
-            "/mnt/fspace/hproject/model/stable-diffusion-v1-5", 
+            SDModel_Path, 
             controlnet=controlnet, 
             torch_dtype=weight_dtype
         ).to(device, weight_dtype)
@@ -253,6 +260,7 @@ def test(
     pretrained_model_path: str,
     method: str,
     control_class: str,
+    Use_DeepSeek: bool,
     dataset_config: Dict,
     logdir: str = None,
     editing_config: Optional[Dict] = None,
@@ -268,8 +276,9 @@ def test(
     # 使用上下文管理器设置 diffusers 环境
     with diffusers_context(method):
         import diffusers
-        print("________________", diffusers.__file__)
-    
+        #print("________________", diffusers.__file__)
+    source_prompt=dataset_config["prompt"]
+    target_prompt=editing_config["editing_prompts"]
     args = get_function_args()
     grid_sizeH = editing_config["grid_sizeH"]
     grid_sizeW = editing_config["grid_sizeW"]
@@ -291,11 +300,35 @@ def test(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision=mixed_precision,
     )
-    
+  
     if accelerator.is_main_process:
         os.makedirs(logdir, exist_ok=True)
         OmegaConf.save(args, os.path.join(logdir, "config.yml"))
-    
+        
+    if method=="FateZero" and Use_DeepSeek==True:
+        if GPU_num>1:
+            if accelerator.is_main_process:
+                LLM_result = deepseek.LLM(source_prompt=source_prompt, target_prompt=target_prompt)
+                print("DeepSeek Parameter Recommendation2GPU:",LLM_result)
+                torch.save(LLM_result,os.path.join(logdir, "deepseek.pt"))
+            dist.barrier()
+            if dist.get_rank()!=0:
+                LLM_result=torch.load(os.path.join(logdir, "deepseek.pt"))
+        elif GPU_num==1:
+            LLM_result = deepseek.LLM(source_prompt=source_prompt, target_prompt=target_prompt)
+            print("DeepSeek Parameter Recommendation1GPU:",LLM_result)
+        local_editing = LLM_result["local_editing"] 
+        self_replace_steps_DeepSeek=LLM_result["self_replace_steps"]
+        fine_tune=LLM_result["fine_tune"]
+        editing_config["p2p_config"]["is_replace_controller"]=local_editing
+        editing_config["p2p_config"][0]["self_replace_steps"]=self_replace_steps_DeepSeek
+        if fine_tune==True:
+            pretrained_model_path="./outputs/wolf"
+        elif fine_tune==False:
+            pretrained_model_path="/mnt/fspace/hproject/model/stable-diffusion-v1-5"
+
+ 
+        
     pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image,scheduler_config = init_model(
         pretrained_model_path, method, grid_sizeH, grid_sizeW, model_config,
         test_pipeline_config, video_length, accelerator, dataset_config["path"],
@@ -331,7 +364,7 @@ def test(
    
     for step, batch in enumerate(train_dataloader):
         assert batch["images"].shape[0] == 1, "Only support, overfiting on a single video"
-        print("batch['images'].shape=", batch['images'].shape)
+        print("frames_per_GPU:", batch['images'].shape[2])
         
         vae.eval()
         text_encoder.eval()
@@ -447,4 +480,6 @@ def run(config):
             test(config=config, **Omegadict)
 
 if __name__ == "__main__":
+    import warnings
+    warnings.filterwarnings("ignore", module="torchvision.io.image")
     run()

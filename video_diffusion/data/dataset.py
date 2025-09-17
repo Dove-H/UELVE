@@ -85,7 +85,7 @@ class ImageSequenceDataset(Dataset):
         start_idx = index * frames_per_gpu
         end_idx = (index + 1) * frames_per_gpu
         frames = frames[:, start_idx:end_idx, :, :]
-        print("frames_per_GPU.shape", frames.shape)
+        
         return_batch.update(
             {
                 "images": frames,

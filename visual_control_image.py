@@ -70,8 +70,8 @@ def visualize_control_tensor(control_pt_path, output_dir=None, save_images=True,
 
 # 使用方法
 if __name__ == "__main__":
-    control_pt_path = "Control/1GPU/lineart_realistic/wolf/8/control.pt"
-    output_dir = "canny"
+    control_pt_path = "/mnt/fspace/hproject/ELVE/Control/1GPU/canny/wolf/8/control.pt"
+    output_dir = "control_image/canny"
     
     # 可视化control.pt
     control_tensor = visualize_control_tensor(

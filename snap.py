@@ -7,7 +7,7 @@ from huggingface_hub import snapshot_download
 snapshot_download(
     repo_id="lllyasviel/Annotators",  # 仓库ID
     repo_type="model",
-    local_dir="/mnt/fspace/hproject/ELVE/pretrained_models/midas",
-    allow_patterns=["*dpt_hybrid-midas-501f0c75.pt"],  # 只下载这个文件
+    local_dir="/mnt/fspace/hproject/ELVE/pretrained_models/leres",
+    allow_patterns=["*res101.pth"],  # 只下载这个文件
     force_download=False
 )

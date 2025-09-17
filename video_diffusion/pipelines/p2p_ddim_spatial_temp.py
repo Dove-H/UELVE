@@ -107,7 +107,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         self.inverse_scheduler = DDIMScheduler.from_config(self.scheduler_config)  # 从配置中创建DDIMScheduler对象
         self.inverse_scheduler.set_timesteps(self.num_inference_steps, device=self.device)  # 设置时间步长
         self.timesteps = reversed(self.inverse_scheduler.timesteps)  # 获取倒序的时间步长
-        print(self.timesteps)
+        #print(self.timesteps)
         if self.method=="FateZero":
             if store_attention:
                 attention_util.register_attention_control(self, self.store_controller)
@@ -251,12 +251,14 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         return timesteps, num_inference_steps - t_start
     
     def p2preplace_edit(self, **kwargs):
+       
         control_image = kwargs.pop('control_image', None)
         controlnet_conditioning_scale = kwargs.pop('controlnet_conditioning_scale', 1.0)
         len_source = {len(kwargs['source_prompt'].split(' '))}
         len_target = {len(kwargs['prompt'].split(' '))}
         equal_length = (len_source == len_target)
-        print(f" len_source: {len_source}, len_target: {len_target}, equal_length: {equal_length}")
+        # if self.accelerator.is_main_process:
+        #     print(f" len_source: {len_source}, len_target: {len_target}, equal_length: {equal_length}")
         if self.method=="ControlNet":
             #C/F
             edit_controller=None
@@ -462,6 +464,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
             #C/F
             control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=2)
             control_image = grid.combine_frames_in_grid(control_image, self.grid_sizeH, self.grid_sizeW)
+        
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in tqdm(enumerate(self.scheduler.timesteps), desc='reverse_diffusion'):
                 #C/F

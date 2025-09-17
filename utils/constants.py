@@ -20,10 +20,10 @@ PREPROCESSOR_DICT = {
     'softedge_pidinet': '/mnt/fspace/hproject/model/control_v11p_sd15_softedge/',
     'softedge_pidsafe': '/mnt/fspace/hproject/model/control_v11p_sd15_softedge/',
     'canny': '/mnt/fspace/hproject/model/control_v11p_sd15_canny',
-    'depth_leres': '/mnt/fspace/hproject/model/control_v11f1p_sd15_depth/snapshots/539f99181d33db39cf1af2e517cd8056785f0a87/',
-    'depth_leres++': '/mnt/fspace/hproject/model/control_v11f1p_sd15_depth/snapshots/539f99181d33db39cf1af2e517cd8056785f0a87/',
-    'depth_midas': '/mnt/fspace/hproject/model/control_v11f1p_sd15_depth/snapshots/539f99181d33db39cf1af2e517cd8056785f0a87/',
-    'depth_zoe': '/mnt/fspace/hproject/model/control_v11f1p_sd15_depth/snapshots/539f99181d33db39cf1af2e517cd8056785f0a87/',
+    'depth_leres': '/mnt/fspace/hproject/model/control_v11f1p_sd15_depth/',
+    'depth_leres++': '/mnt/fspace/hproject/model/control_v11f1p_sd15_depth/',
+    'depth_midas': '/mnt/fspace/hproject/model/control_v11f1p_sd15_depth/',
+    'depth_zoe': '/mnt/fspace/hproject/model/control_v11f1p_sd15_depth/'
 }
 
 MODEL_IDS = {

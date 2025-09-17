@@ -62,7 +62,7 @@ def glob_files(
 
 def get_time_string() -> str:
     x = datetime.datetime.now()
-    return f"{(x.year - 2000):02d}{x.month:02d}{x.day:02d}-{x.hour:02d}{x.minute:02d}{x.second:02d}"
+    return f"{(x.year - 2000):02d}{x.month:02d}{x.day:02d}-{x.hour:02d}{x.minute:02d}"
 
 
 def get_function_args() -> Dict:

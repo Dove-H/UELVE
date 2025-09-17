@@ -55,6 +55,7 @@ class P2pSampleLogger:
         self.grid_column_size = grid_column_size
         self.prompt2prompt_edit = prompt2prompt_edit
         self.p2p_config = p2p_config
+       
         self.use_inversion_attention = use_inversion_attention
         self.source_prompt = source_prompt
         self.traverse_p2p_config =traverse_p2p_config
@@ -75,7 +76,8 @@ class P2pSampleLogger:
         # handle input image
         input_pil_images = pipeline.numpy_to_pil(tensor_to_numpy(image))[0]
         samples_all.append(input_pil_images)
-        for idx, prompt in enumerate(tqdm(self.editing_prompts, desc="Generating sample images")):
+        
+        for idx, prompt in enumerate(self.editing_prompts):
             p2p_config_now = copy.deepcopy(self.p2p_config[idx])
             edit_type = 'swap'
             p2p_config_now.update({'save_self_attention': False})
@@ -84,6 +86,7 @@ class P2pSampleLogger:
            
             generator = torch.Generator(device=device)
             generator.manual_seed(0)
+
             sequence_return = pipeline(
                 prompt=input_prompt,
                 source_prompt = self.editing_prompts[0] if self.source_prompt is None else self.source_prompt,
