@@ -11,6 +11,7 @@ import torch
 import torch.utils.data
 import PIL
 import grid
+import time
 from PIL import Image
 from accelerate import Accelerator
 import warnings
@@ -175,6 +176,7 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
             pretrained_model_path,
             subfolder="scheduler",
         )
+
         controlnet = None
         prepare_control_image = None
         scheduler_config=scheduler.config
@@ -375,7 +377,12 @@ def test(
             images=batch["images"]
             images=grid.combine_frames_in_grid(images,grid_sizeH,grid_sizeW)
             images_for_depth = rearrange(images.to(dtype=weight_dtype), "b c f h w -> (b f) c h w")
+            time1=time.time()
+            print("start control image make")
             depth_images = control_preprocess(images_for_depth,accelerator,controlnet,prepare_control_image,Control_image_path,control_class)
+            time2=time.time()
+            print("end control image make")
+            print("control_image time cost=",time2-time1)
             depth_images=rearrange(depth_images,"(b f) c h w -> b c f h w", b=1)
             depth_images=grid.restore_frames_from_grid(depth_images,grid_sizeH,grid_sizeW)
             depth_images=rearrange(depth_images,"b c f h w -> (b f) c h w")
