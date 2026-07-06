@@ -79,7 +79,8 @@ class SpatialBlender:
         self.counter += 1
         if self.fixed_mask is not None:
             # External precomputed mask (GroundingDINO+FastSAM): bypass cross-attention entirely.
-            return self._blend_with_fixed_mask(x_t)
+            # Handles both latent blending (x_t given) and self-attention blending (x_t None, target_h/w given).
+            return self._blend_with_fixed_mask(x_t, target_h, target_w)
         # if (self.counter > self.start_blend) and (self.counter < self.end_blend):
 
 
@@ -135,21 +136,46 @@ class SpatialBlender:
                 grid_sizeH=x_t.shape[-2]//64
                 mask2=grid.combine_frames_in_grid(mask2,grid_sizeH,grid_sizeW)
                 #print("mask222.shape=",mask2.shape)
+                # save the cross-attention blend mask used at this step (clean, step-ordered, in {logdir}/mask)
+                if self.save_path is not None:
+                    _mdir = os.path.join(os.path.dirname(self.save_path), "mask")
+                    os.makedirs(_mdir, exist_ok=True)
+                    try:
+                        import torch.distributed as _dist
+                        _rank = _dist.get_rank() if (_dist.is_available() and _dist.is_initialized()) else 0
+                    except Exception:
+                        _rank = 0
+                    _msave = mask2.detach().float().cpu()
+                    while _msave.dim() > 2:          # collapse to [H, W] (robust to 4D/5D mask2)
+                        _msave = _msave[0]
+                    _msave = F.interpolate(_msave[None, None], size=(512, 512), mode="nearest")
+                    tvu.save_image(_msave, os.path.join(_mdir, f"latent_blend_rank{_rank}_step{self.counter:03d}.png"), normalize=True)
                 x_t = x_t[:1] + mask2 * (x_t - x_t[:1])
             return x_t
         else:
             return mask
        
-    def _blend_with_fixed_mask(self, x_t):
-        """External-mask latent blending (GroundingDINO+FastSAM via mask_utils.gen_masks).
+    def _blend_with_fixed_mask(self, x_t, target_h=None, target_w=None):
+        """External-mask blending (GroundingDINO+FastSAM via mask_utils.gen_masks).
+
+        Two call modes (mirrors the cross-attention SpatialBlender so the same external mask
+        drives BOTH latent blending and self-attention blending, unified by the yaml switch):
+          - latent blend:  x_t given            -> tile per-frame masks into x_t's grid, blend, return x_t.
+          - self-attn blend: x_t None, target_h/w given -> return per-frame mask [1, F, target_h, target_w].
 
         self.fixed_mask: [F, H, W] float in [0,1] (F = frames on this rank, e.g. 512x512).
-        Area-resize to per-frame latent resolution, tile per-frame masks into the same 2x2 grid
-        layout as x_t, then blend: mask=1 -> generated (target) latent, mask=0 -> inverted (source).
-        Bypasses cross-attention, sidestepping the attention-mask shape issues in the grid layout.
         """
         if x_t is None:
-            return None
+            # self-attention blend path: return external mask at the requested per-frame attention res,
+            # shaped [1, F, target_h, target_w] to match the cross-attention get_mask('source') output.
+            if target_h is None or target_w is None:
+                return None
+            fm = self.fixed_mask
+            if fm.dim() == 2:
+                fm = fm.unsqueeze(0)                                  # [F, H, W]
+            m = F.interpolate(fm.unsqueeze(1).float(), size=(target_h, target_w), mode="area")  # [F,1,th,tw]
+            m = (m > 0.5).float()
+            return m.squeeze(1).unsqueeze(0)                          # [1, F, th, tw]
         # per-frame latent resolution inferred from x_t's grid layout (64 for 512-input)
         grid_sizeH = max(x_t.shape[-2] // 64, 1)
         grid_sizeW = max(x_t.shape[-1] // 64, 1)

@@ -496,6 +496,8 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                 
               
                 for j, latent_grid_in_unet in enumerate(latent_grids_in_unet):
+                    if controller is not None:
+                        controller.cur_grid_idx = j   # tell the self-attn mask which grid/frame is being processed (grid 1x1 vs 2x2 adaptive)
                     if self.method =="ControlNet":
                         #C/F
                         latent_grid_in_unet = latent_grid_in_unet.squeeze(2)

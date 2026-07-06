@@ -148,6 +148,11 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                         h = int(np.sqrt(attn_repalce.shape[-1]//(grid_sizeH*grid_sizeW)))
                         w=h
                         mask = self.attention_blend(target_h = h, target_w =w, attention_store= step_in_store_atten_dict, step_in_store=step_in_store)
+                        # slice to the current grid's frames so it adapts to grid layout:
+                        # grid 2x2 -> H*W=4 frames/grid (j stays 0, single grid); grid 1x1 -> 1 frame/grid (j=0..F-1)
+                        _g = grid_sizeH * grid_sizeW
+                        _j = getattr(self, 'cur_grid_idx', 0)
+                        mask = mask[:, _j*_g:(_j+1)*_g]
                         mask=mask.unsqueeze(1)
                         mask=grid.combine_frames_in_grid(mask,grid_sizeH,grid_sizeW)
                         mask=mask.squeeze(1)
@@ -373,11 +378,12 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
         else:
             latent_blend = None
         if blend_self_attention:
-            attention_blend = SpatialBlender( prompts, blend_words, 
+            attention_blend = SpatialBlender( prompts, blend_words,
                                                     start_blend = 0.0, end_blend=2,
                                                   tokenizer=tokenizer, th=blend_self_th, NUM_DDIM_STEPS=NUM_DDIM_STEPS,
                            save_path=save_path+f'/attention_blend_mask',
-                           prompt_choose='source')
+                           prompt_choose='source',
+                           fixed_mask=fixed_mask)
             print(f'Blend self attention mask with threshold {blend_self_th}')
         else:
             attention_blend = None

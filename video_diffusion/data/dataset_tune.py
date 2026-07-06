@@ -32,8 +32,9 @@ class TuneAVideoDataset(Dataset):
 
         if 'mp4' not in self.video_path:
             self.images = []
-            _files = [f for f in os.listdir(self.video_path) if f.endswith('jpg')]
-            for file in sorted(_files, key=lambda x: int(x[:-4])):
+            _files = [f for f in os.listdir(self.video_path)
+                      if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.webp'))]
+            for file in sorted(_files, key=lambda x: int(os.path.splitext(x)[0])):
                 self.images.append(np.asarray(Image.open(os.path.join(self.video_path, file)).convert('RGB').resize((self.width, self.height))))
         self.images = np.stack(self.images)
 
