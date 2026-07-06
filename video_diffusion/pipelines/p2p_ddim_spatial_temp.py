@@ -4,6 +4,7 @@ import PIL
 import time
 from accelerate import Accelerator
 import torch
+import random
 import torch.distributed as dist
 import grid
 import time
@@ -282,7 +283,8 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                                 save_path=kwargs.get('save_path', None),
                                 save_self_attention = kwargs.get('save_self_attention', True),
                                 disk_store = kwargs.get('disk_store', False),
-                                attention_path=self.attention_path  # 传递参数
+                                attention_path=self.attention_path,  # 传递参数
+                                fixed_mask=getattr(self, 'fixed_mask', None)  # 外接掩码（GroundingDINO+FastSAM）
                                 )
             attention_util.register_attention_control(self, edit_controller)
             
@@ -316,12 +318,15 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         return dict_output
     
     def alternate(self,latents,flag):
+
         org = list(range(self.video_length))
+    
         alt = org[self.grid_sizeH:] + org[:self.grid_sizeH]
+        # alt=org
         if self.video_length==self.grid_sizeH*self.grid_sizeW:
             indicate=org
             sqc=org
-        elif flag%2==0 and self.video_length!=self.grid_sizeH*self.grid_sizeW:
+        elif flag%2==1 and self.video_length!=self.grid_sizeH*self.grid_sizeW:
             indicate=alt
             sqc=alt
         else:
@@ -341,7 +346,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         # if self.video_length == self.grid_sizeH *self.grid_sizeW:
         #     indicate = org
         #     sqc = org
-        if flag % 2 == 0:
+        if flag % 2 == 1:
             # 偶数变
             sqc = alt
             if rank == 0:

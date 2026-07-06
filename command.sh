@@ -1,4 +1,18 @@
-CUDA_VISIBLE_DEVICES=1  PYTHONWARNINGS="ignore" accelerate launch --num_processes=1 test_fatezero.py --config config/shape/wolf.yaml
-CUDA_VISIBLE_DEVICES=0,1  PYTHONWARNINGS="ignore" accelerate launch run_tuning_1.py --config config/car-tree-tune.yaml
-
-CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/shape/wolf.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/bear-black.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/bear-cartoon.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/bear-pig.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/bird-snow.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/bird-dove.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/bird-raven.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/car-driving-railway.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/car-driving-wooden.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/car-driving-sunset.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/car-tree-crochet.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/car-tree-tractor.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/car-tree-autumn.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/car-turn-red.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/car-turn-wooden.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/car-turn-watercolor.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/cat-minialist.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/cat-tiger.yaml
+CUDA_VISIBLE_DEVICES=0,1 PYTHONWARNINGS="ignore" accelerate launch test_fatezero.py --config config/edit/cat-wolf.yaml

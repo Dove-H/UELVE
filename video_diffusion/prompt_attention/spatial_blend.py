@@ -77,8 +77,12 @@ class SpatialBlender:
         # print("target_h.shape=",target_h)
         
         self.counter += 1
+        if self.fixed_mask is not None:
+            # External precomputed mask (GroundingDINO+FastSAM): bypass cross-attention entirely.
+            return self._blend_with_fixed_mask(x_t)
         # if (self.counter > self.start_blend) and (self.counter < self.end_blend):
-            
+
+
         maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
         # breakpoint()
         assert len(attention_store["down_cross"][0].shape) in [5, 4], \
@@ -136,14 +140,46 @@ class SpatialBlender:
         else:
             return mask
        
-    def __init__(self, prompts: List[str], words: [List[List[str]]], substruct_words=None, 
+    def _blend_with_fixed_mask(self, x_t):
+        """External-mask latent blending (GroundingDINO+FastSAM via mask_utils.gen_masks).
+
+        self.fixed_mask: [F, H, W] float in [0,1] (F = frames on this rank, e.g. 512x512).
+        Area-resize to per-frame latent resolution, tile per-frame masks into the same 2x2 grid
+        layout as x_t, then blend: mask=1 -> generated (target) latent, mask=0 -> inverted (source).
+        Bypasses cross-attention, sidestepping the attention-mask shape issues in the grid layout.
+        """
+        if x_t is None:
+            return None
+        # per-frame latent resolution inferred from x_t's grid layout (64 for 512-input)
+        grid_sizeH = max(x_t.shape[-2] // 64, 1)
+        grid_sizeW = max(x_t.shape[-1] // 64, 1)
+        hl, wl = x_t.shape[-2] // grid_sizeH, x_t.shape[-1] // grid_sizeW
+        fm = self.fixed_mask.to(device=x_t.device, dtype=x_t.dtype)
+        if fm.dim() == 2:
+            fm = fm.unsqueeze(0)                                  # [F, H, W]
+        m = F.interpolate(fm.unsqueeze(0), size=(hl, wl), mode="area")  # [1,F,H,W] -> [1,F,hl,wl]
+        m = (m > 0.5).float()
+        mask_pf = m.unsqueeze(1)                                  # [1,1,F,hl,wl] = (b,c,videolength,h,w)
+        mask_grid = grid.combine_frames_in_grid(mask_pf, grid_sizeH, grid_sizeW)  # [1,1,F//(HW),gh,gw]
+        if x_t.dim() == 4:
+            mask_grid = mask_grid.squeeze(2)                      # [1,1,gh,gw] for 4D x_t
+        # per-frame latent mask for downstream visualization: [F,1,hl,wl]
+        self.mask_list.append(m.squeeze(0).unsqueeze(1).float().cpu().detach())
+        if (self.counter > self.start_blend) and (self.counter < self.end_blend):
+            x_t = x_t[:1] + mask_grid * (x_t - x_t[:1])
+        return x_t
+
+    def __init__(self, prompts: List[str], words: [List[List[str]]], substruct_words=None,
                  start_blend=0.2, end_blend=0.8,
                  th=(0.9, 0.9), tokenizer=None, NUM_DDIM_STEPS =None,
-                 save_path = None, prompt_choose='source'):
+                 save_path = None, prompt_choose='source', fixed_mask=None):
         """
         Args:
             start_blend (float, optional): For latent blending, defaults to 0.2, for attention fusion better to be 0.0
             end_blend (float, optional): For latent blending, defaults to 0.8, for attention fusion better to be 1.0
+            fixed_mask (torch.Tensor, optional): External precomputed per-frame mask [F,H,W] in [0,1]
+                (e.g. from GroundingDINO+FastSAM). If given, latent blending uses it directly and
+                bypasses the cross-attention-derived mask.
         """
         self.count = 0
         self.MAX_NUM_WORDS = 77
@@ -184,7 +220,8 @@ class SpatialBlender:
         
         self.start_blend = int(start_blend * self.NUM_DDIM_STEPS)
         self.end_blend = int(end_blend * self.NUM_DDIM_STEPS)
-        self.counter = 0 
+        self.counter = 0
         self.th=th
         self.mask_list = []
+        self.fixed_mask = fixed_mask.to(device) if fixed_mask is not None else None
 
