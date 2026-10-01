@@ -13,6 +13,7 @@ import os
 import json
 import ast
 import re
+import time
 
 from openai import OpenAI
 
@@ -214,6 +215,73 @@ def LLM(source_prompt, target_prompt):
     result = parse_llm_response(response.choices[0].message.content)
 
     return result
+
+
+# 流式决策用：model_adaption 被要求前置输出（见 PROMPT_OUTPUT_SPEC），
+# 其值以闭引号完整出现时该正则即可命中，无需等 Thinking 生成完。
+ADAPTION_STREAM_RE = re.compile(r'"model_adaption"\s*:\s*[\'"](.*?)[\'"]')
+
+
+def LLM_stream(source_prompt, target_prompt):
+    """流式版 LLM()：不等全部输出结束，解析出 model_adaption 即提前返回。
+
+    输出规范要求 model_adaption 前置，因此流式读取时该字段最先完整出现，
+    管线可立刻根据它决定模型配置（zero-shot 免 tune / one-shot(temporal
+    module) 启动 tune / one-shot(Motion module) 启动 MotionEditor），
+    无需等待较长的 Thinking 文本生成完毕。
+
+    返回 (model_adaption, info)：
+      model_adaption — str，如 'no-mask, one-shot(Motion module)'；
+                       流结束仍未解析出时用 parse_llm_response 全量兜底，
+                       再失败则为 None
+      info           — dict：t_adaption_ms(提前拿到决策的时刻) /
+                       t_total_ms(流到此结束的时刻) / partial(已生成的部分响应)
+    """
+    print("source_prompt=", source_prompt)
+    print("target_prompt=", target_prompt[0])
+    content = USER_PROMPT_TEMPLATE.format(
+        source_prompt=source_prompt, target_prompt=target_prompt
+    )
+
+    t0 = time.perf_counter()
+    stream = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        temperature=0.2,   # 分类任务，低温度保证稳定
+        top_p=1.0,
+        max_tokens=2048,
+        stream=True,
+    )
+
+    buf, adaption, t_adaption = "", None, None
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta.content or ""
+        if not delta:
+            continue
+        buf += delta
+        if adaption is None:
+            m = ADAPTION_STREAM_RE.search(buf)
+            if m:
+                adaption = m.group(1).strip()
+                t_adaption = (time.perf_counter() - t0) * 1000
+                print(f"[DeepSeek][stream] model_adaption 提前解析成功 @ {t_adaption:.0f} ms: {adaption!r}")
+                break  # 决策字段已到手，不等 Thinking 生成完，立刻返回供管线路由
+    t_end = (time.perf_counter() - t0) * 1000
+
+    if adaption is None:
+        # 兜底：模型未按规范前置输出，流已读完，全量解析
+        result = parse_llm_response(buf)
+        adaption = result.get("model_adaption") if isinstance(result, dict) else None
+        t_adaption = t_end
+        print(f"[DeepSeek][stream] 未能提前解析，流结束后全量解析 @ {t_end:.0f} ms: {adaption!r}")
+
+    info = {"t_adaption_ms": t_adaption, "t_total_ms": t_end, "partial": buf}
+    return adaption, info
 
 
 def parse_llm_response(response):

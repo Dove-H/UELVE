@@ -6,6 +6,8 @@ from glob import glob
 from typing import Optional, Dict
 from omegaconf import OmegaConf
 import click
+import json
+import subprocess
 import torch.distributed as dist
 import torch
 import torch.utils.data
@@ -79,6 +81,165 @@ def diffusers_context(method):
         yield local_diffusers_path
     finally:
         pass
+
+
+# ============================================================
+# LLM 语义分析与模型适配路由（论文 Sec 3.3 / Figure 3）：
+# pipeline 启动前，由 LLM 对比 source/target prompt 流式输出决策。
+# model_adaption 前置 -> 不等 Thinking 生成完即可路由：
+#   zero-shot                  -> 不跑 tune，直接加载预训练模型
+#   one-shot(temporal module)  -> 自主启动 tune，跑完加载微调后的模型文件
+#   one-shot(Motion module)    -> 启动外置 MotionEditor 模块
+# ============================================================
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_PRETRAINED = "/mnt/fspace/hproject/model/stable-diffusion-v1-5"
+# MotionEditor 独立 conda env（py3.10 + diffusers 0.15.1），与 ELVE env 隔离，
+# 用绝对路径调用以避开 PATH 被 ELVE env 劫持的问题
+MOTIONEDITOR_PYTHON = "/home/user4/miniconda3/envs/motioneditor/bin/python3.10"
+TUNE_DONE_MARKER = "tune_done.marker"
+
+
+def _is_main_process():
+    """多进程(accelerate launch)时仅 RANK/LOCAL_RANK=0 做 LLM 决策与 tune，
+    其余进程读它写出的决策文件并等待微调产物；单进程直跑时恒为 True。"""
+    for var in ("RANK", "LOCAL_RANK", "SLURM_PROCID"):
+        if var in os.environ:
+            return int(os.environ[var]) == 0
+    return True
+
+
+def classify_adaption(adaption):
+    """把 model_adaption 文本归一化为三种路由之一：
+    'motion' | 'temporal' | 'zero-shot'（对应论文 Figure 3a 的三种模型适配）。"""
+    text = str(adaption or "").lower().replace(" ", "")
+    if "one-shot(motionmodule)" in text:
+        return "motion"
+    if "one-shot(temporalmodule)" in text:
+        return "temporal"
+    return "zero-shot"
+
+
+def _decision_path(config):
+    """rank0 与其余进程交换 LLM 决策的确定性文件路径（多 GPU 时用）"""
+    return config + ".llm_decision"
+
+
+def _wait_for_file(path, timeout_s, what, fresh_after=None):
+    """轮询等待文件出现并返回其内容；fresh_after 用于拒绝上一轮运行留下的旧文件。"""
+    t0 = time.time()
+    while True:
+        if os.path.exists(path) and os.path.getmtime(path) >= (fresh_after or 0):
+            with open(path) as f:
+                return f.read()
+        if time.time() - t0 > timeout_s:
+            raise TimeoutError(f"等待 {what} 超时: {path}")
+        time.sleep(5)
+
+
+def run_tune(tune_config_path):
+    """阶段2：one-shot(temporal module) —— 自主启动 tune（微调膨胀后的时空注意力，
+    论文 Sec 3.3 "if a big shape change occurs, UELVE just finetunes the inflated
+    spatial-temporal attention"）。跑完返回微调模型目录，pipeline 直接加载它。
+
+    run_tuning_1.py 结束时会将完整 pipeline（含微调后的 unet）save_pretrained 到
+    tune yaml 的 output_dir；沿用 read.sh 的启动方式（accelerate launch）。
+    """
+    tune_cfg = OmegaConf.load(tune_config_path)
+    output_dir = tune_cfg["output_dir"]
+    if not os.path.isabs(output_dir):
+        # tune yaml 内的相对路径以项目根目录为基准
+        output_dir = os.path.join(PROJECT_ROOT, output_dir)
+    output_dir = os.path.normpath(output_dir)
+    done_marker = os.path.join(output_dir, TUNE_DONE_MARKER)
+
+    if os.path.isdir(output_dir) and "unet" in os.listdir(output_dir):
+        print(f"[tune] 已存在微调模型 {output_dir}，跳过 tune（如需重训请删除该目录）")
+    else:
+        accelerate_bin = os.path.join(os.path.dirname(sys.executable), "accelerate")
+        launcher = [accelerate_bin, "launch", "--num_processes=1"] \
+            if os.path.exists(accelerate_bin) else [sys.executable]
+        cmd = launcher + ["run_tuning_1.py", "--config", tune_config_path]
+        # 自主启动固定单卡：run_tuning_1.py 的多卡分支（_set_static_graph /
+        # alternate_multiGPU）要求分布式多进程启动，单进程 + 多卡可见会崩溃
+        env = dict(os.environ)
+        cvd = env.get("CUDA_VISIBLE_DEVICES", "")
+        env["CUDA_VISIBLE_DEVICES"] = cvd.split(",")[0].strip() if cvd else "0"
+        print(f"[tune] one-shot(temporal module) -> 启动微调: {' '.join(cmd)}"
+              f"  (CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']})")
+        subprocess.run(cmd, check=True, cwd=PROJECT_ROOT, env=env)
+        assert "unet" in os.listdir(output_dir), \
+            f"tune 结束但 {output_dir} 下没有 unet/，微调产物不完整"
+    with open(done_marker, "w") as f:  # 供其余 GPU 进程判断 tune 已完成
+        f.write(tune_config_path)
+    print(f"[tune] 微调完成，pipeline 将加载微调后模型: {output_dir}")
+    return output_dir
+
+
+def launch_motioneditor(me_config=None):
+    """阶段3：one-shot(Motion module) —— 启动外置 MotionEditor 模块。
+
+    MotionEditor 尚未融合进 ELVE pipeline（独立代码库，依赖 py3.10 +
+    diffusers 0.15.1 的 conda env motioneditor），因此用子进程 + 绝对解释器
+    路径启动。默认跑 case-4（checkpoints 已就绪，直接推理即可验证模块启动）。
+    """
+    me_root = os.path.join(PROJECT_ROOT, "MotionEditor")
+    me_config = me_config or os.path.join("configs", "case-4", "eval-motion.yaml")
+    cmd = [MOTIONEDITOR_PYTHON, "inference.py", f"--config={me_config}"]
+    print(f"[MotionEditor] one-shot(Motion module) -> 外置模块启动: {' '.join(cmd)}  (cwd={me_root})")
+    subprocess.run(cmd, cwd=me_root, check=True)
+
+
+def llm_decision_routing(Omegadict, config):
+    """pipeline 启动前的 LLM 语义分析入口。
+
+    流式调用 DeepSeek（model_adaption 前置输出，不等 Thinking 生成完），
+    按解析结果决定模型配置，返回需要覆盖到 edit 配置上的字段 dict；
+    判定 one-shot(Motion module) 时直接启动外置 MotionEditor 并返回 None。
+    """
+    paradigm = None
+    if _is_main_process():
+        # 先清掉上一轮的决策文件，避免多 GPU 时其余进程读到旧决策
+        if os.path.exists(_decision_path(config)):
+            os.remove(_decision_path(config))
+        source_prompt = Omegadict["dataset_config"]["prompt"]
+        target_prompt = list(Omegadict["editing_config"]["editing_prompts"])
+        adaption, info = deepseek.LLM_stream(source_prompt, target_prompt)
+        paradigm = classify_adaption(adaption)
+        print(f"[LLM] model_adaption = {adaption!r} -> 路由: {paradigm} "
+              f"(较全量输出提前 {info['t_total_ms'] - info['t_adaption_ms']:.0f} ms 拿到决策)")
+        with open(_decision_path(config), "w") as f:  # 多 GPU 时同步给其余进程
+            json.dump({"adaption": adaption, "paradigm": paradigm}, f)
+    else:
+        decision = _wait_for_file(_decision_path(config), timeout_s=600,
+                                  what="rank0 的 LLM 决策", fresh_after=time.time() - 2)
+        paradigm = json.loads(decision)["paradigm"]
+        print(f"[LLM] 其余进程读取 rank0 决策 -> 路由: {paradigm}")
+
+    if paradigm == "motion":
+        # 阶段3：MotionEditor 为外置模块，启动后即返回，不进入 ELVE pipeline
+        if _is_main_process():
+            launch_motioneditor(Omegadict.get("motioneditor-yaml", None))
+        return None
+
+    overrides = {}
+    if paradigm == "temporal":
+        # 阶段2：先自主跑 tune，再加载 tune 后的模型文件（本阶段固定走 FateZero 模式）
+        overrides["method"] = "FateZero"
+        tune_yaml = Omegadict.get("tune-yaml", os.path.join("config", "tune", "child-tune.yaml"))
+        if _is_main_process():
+            tuned_dir = run_tune(tune_yaml)
+        else:
+            tune_output = OmegaConf.load(tune_yaml)["output_dir"]
+            if not os.path.isabs(tune_output):
+                tune_output = os.path.join(PROJECT_ROOT, tune_output)
+            _wait_for_file(os.path.join(tune_output, TUNE_DONE_MARKER), timeout_s=4 * 3600,
+                           what="rank0 的 tune 完成", fresh_after=time.time() - 2)
+            tuned_dir = tune_output
+        overrides["pretrained_model_path"] = tuned_dir
+    else:
+        # zero-shot：无需 tune，直接加载默认预训练模型
+        overrides["pretrained_model_path"] = DEFAULT_PRETRAINED
+    return overrides
 
 
 def run_motioneditor(cfg):
@@ -338,30 +499,12 @@ def test(
         os.makedirs(logdir, exist_ok=True)
         OmegaConf.save(args, os.path.join(logdir, "config.yml"))
         
-    if method=="FateZero" and Use_DeepSeek==True:
-        if GPU_num>1:
-            if accelerator.is_main_process:
-                LLM_result = deepseek.LLM(source_prompt=source_prompt, target_prompt=target_prompt)
-                print("DeepSeek Parameter Recommendation2GPU:",LLM_result)
-                torch.save(LLM_result,os.path.join(logdir, "deepseek.pt"))
-            dist.barrier()
-            if dist.get_rank()!=0:
-                LLM_result=torch.load(os.path.join(logdir, "deepseek.pt"))
-        elif GPU_num==1:
-            LLM_result = deepseek.LLM(source_prompt=source_prompt, target_prompt=target_prompt)
-            print("DeepSeek Parameter Recommendation1GPU:",LLM_result)
-        local_editing = LLM_result["local_editing"] 
-        self_replace_steps_DeepSeek=LLM_result["self_replace_steps"]
-        fine_tune=LLM_result["fine_tune"]
-        editing_config["p2p_config"]["is_replace_controller"]=local_editing
-        editing_config["p2p_config"][0]["self_replace_steps"]=self_replace_steps_DeepSeek
-        if fine_tune==True:
-            pretrained_model_path="./outputs/wolf"
-        elif fine_tune==False:
-            pretrained_model_path="/mnt/fspace/hproject/model/stable-diffusion-v1-5"
+    # LLM 语义分析与决策已在启动部分完成（llm_decision_routing，见 run()）：
+    # model_adaption 的路由结果（是否 tune、加载哪个模型）通过
+    # pretrained_model_path / method 覆盖传入，此处不再重复调用 LLM。
 
- 
-        
+
+
     pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image,scheduler_config = init_model(
         pretrained_model_path, method, grid_sizeH, grid_sizeW, model_config,
         test_pipeline_config, video_length, accelerator, dataset_config["path"],
@@ -563,17 +706,41 @@ def test(
 @click.command()
 @click.option("--config", type=str, default="config/sample.yml")
 def run(config):
+    # 日志重定向到文件时按行刷新，保证 LLM 路由/tune 状态实时可见
+    # （否则 stdio 全缓冲会把路由打印憋到进程退出才落盘）
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     # 首先读取配置获取 method
     Omegadict = OmegaConf.load(config)
     method = Omegadict.get('method')
-    
+
     if not method:
         raise ValueError("Method parameter is required in config")
-    
+
+    # ============================================================
+    # 启动部分：pipeline 启动前先跑 LLM 语义分析（论文 Sec 3.3 决策模块）。
+    # 流式输出 + model_adaption 前置 -> 不等 Thinking 生成完即可路由：
+    #   zero-shot                 直接用预训练模型
+    #   one-shot(temporal module) 自主启动 tune，加载微调后的模型文件
+    #   one-shot(Motion module)   启动外置 MotionEditor 后直接返回
+    # ============================================================
+    llm_overrides = {}
+    if Omegadict.get('Use_DeepSeek', False):
+        llm_overrides = llm_decision_routing(Omegadict, config)
+        if llm_overrides is None:  # 已启动 MotionEditor，不进入 ELVE pipeline
+            return
+        if 'method' in llm_overrides:
+            method = llm_overrides['method']  # temporal 路由固定 FateZero 模式
+
     # 使用上下文管理器运行测试
     with diffusers_context(method):
         # 重新加载配置以确保一致性
         Omegadict = OmegaConf.load(config)
+        if llm_overrides:
+            # 应用 LLM 决策出的模型配置（覆盖重载回来的 yaml 值）
+            Omegadict.merge_with(OmegaConf.create(llm_overrides))
 
         if method == "MotionEditor":
             # MotionEditor 走独立 pipeline，与 ELVE 的 fatezero/controlnet 不交叉
