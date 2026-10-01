@@ -48,6 +48,9 @@ def setup_diffusers_path(method):
         local_diffusers_path = '/mnt/fspace/hproject/ELVE/diffusersF/'
     elif method == "ControlNet":
         local_diffusers_path = '/mnt/fspace/hproject/ELVE/diffusersC/'
+    elif method == "MotionEditor":
+        # MotionEditor 用 pip 装的标准 diffusers 0.15.1，不切 fork（独立 pipeline）
+        return None
     else:
         raise ValueError(f"Unknown method: {method}")
     if local_diffusers_path in sys.path:
@@ -71,11 +74,31 @@ def diffusers_context(method):
     """diffusers 版本切换的上下文管理器"""
     local_diffusers_path = setup_diffusers_path(method)
     clear_diffusers_cache()
-    
+
     try:
         yield local_diffusers_path
     finally:
         pass
+
+
+def run_motioneditor(cfg):
+    """MotionEditor 推理：走独立 pipeline（pipeline_motion_editor），与 ELVE 的 fatezero/controlnet 不交叉。
+    MotionEditor 用标准 diffusers 0.15.1（setup_diffusers_path 不切 fork；diffusers_context 已 clear cache）。
+    在独立 accelerate launch 进程跑，与 ELVE 进程互不干扰。"""
+    me_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'MotionEditor')
+    orig_cwd = os.getcwd()
+    os.chdir(me_dir)  # MotionEditor 用相对路径（checkpoints/、data/），切到其目录
+    sys.path.insert(0, me_dir)  # 让 `from inference import main` / `import motion_editor` 找到
+    try:
+        me_cfg = {k: v for k, v in dict(cfg).items() if k != 'method'}  # 去掉 ELVE 专属的 method 字段
+        import diffusers  # 确认拿到 pip 0.15.1（未切 fork）
+        print(f"[MotionEditor] diffusers = {diffusers.__file__}")
+        from inference import main as me_main
+        me_main(**me_cfg)
+    finally:
+        os.chdir(orig_cwd)
+        if me_dir in sys.path:
+            sys.path.remove(me_dir)
 
 
 
@@ -378,6 +401,11 @@ def test(
     mask_model_path = editing_config.get('mask_model_path', gen_masks.DEFAULT_MASK_MODEL_PATH)
     mask_box_threshold = editing_config.get('mask_box_threshold', 0.30)
     mask_dilate_px = editing_config.get('mask_dilate_px', 4)
+    # Option C: 外接源物体mask(FastSAM)与cross-attention目标物体mask取并集。仅当 use_external_mask=True 时有意义。
+    #   False(默认): 外接mask 直接替换 cross-attention mask(bypass)。
+    #   True: 外接mask ∪ cross-attention mask,用于目标物体(如pizza)在源视频里不存在、无法分割的场景。
+    fuse_target_attention = editing_config.get('fuse_target_attention', False)
+    pipeline.fuse_target_attention = fuse_target_attention
     mask_models = None
     if method == "FateZero" and use_external_mask:
         if not mask_source_word:
@@ -425,6 +453,7 @@ def test(
         use_inversion_attention = editing_config.get('use_inversion_attention', False)
         controlnet_conditioning_scale = 1.0
         
+        _t_inv0 = time.time()
         batch['ddim_init_latents'] = pipeline.prepare_latents_ddim_inverted(
             rearrange(batch["images"].to(dtype=weight_dtype), "b c f h w -> (b f) c h w"),
             batch_size=1,
@@ -438,6 +467,7 @@ def test(
             control_image=depth_images,  # 传入深度图作为控制条件
             scheduler_config=scheduler_config
         )
+        print(f"[TIMING] rank={accelerator.process_index} use_time_Inversion={time.time()-_t_inv0:.4f}", flush=True)
         
         vae.eval()
         text_encoder.eval()
@@ -480,6 +510,7 @@ def test(
             pipeline.fixed_mask = None
 
         if accelerator is not None:
+            _t_den0 = time.time()
             validation_sample_logger.log_sample_images(
                 image=images,
                 pipeline=pipeline,
@@ -489,6 +520,7 @@ def test(
                 save_dir=logdir if verbose else None,
                 control_image=depth_images,  # 传入控制图像
             )
+            print(f"[TIMING] rank={accelerator.process_index} use_time_Denoising={time.time()-_t_den0:.4f}", flush=True)
 
     if mask_models is not None:
         del mask_models
@@ -542,7 +574,12 @@ def run(config):
     with diffusers_context(method):
         # 重新加载配置以确保一致性
         Omegadict = OmegaConf.load(config)
-        
+
+        if method == "MotionEditor":
+            # MotionEditor 走独立 pipeline，与 ELVE 的 fatezero/controlnet 不交叉
+            run_motioneditor(Omegadict)
+            return
+
         if 'unet' in os.listdir(Omegadict['pretrained_model_path']):
             test(config=config, **Omegadict)
 

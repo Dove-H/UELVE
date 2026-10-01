@@ -10,3 +10,8 @@ __pycache__/
 /annotator
 /pretrained_models
 /Control
+/MotionEditor/outputs
+/MotionEditor/checkpoints
+/MotionEditor
+/girl-dance-star-inversion_frames
+/logs

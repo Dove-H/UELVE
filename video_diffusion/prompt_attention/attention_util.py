@@ -148,16 +148,20 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                         h = int(np.sqrt(attn_repalce.shape[-1]//(grid_sizeH*grid_sizeW)))
                         w=h
                         mask = self.attention_blend(target_h = h, target_w =w, attention_store= step_in_store_atten_dict, step_in_store=step_in_store)
-                        # slice to the current grid's frames so it adapts to grid layout:
-                        # grid 2x2 -> H*W=4 frames/grid (j stays 0, single grid); grid 1x1 -> 1 frame/grid (j=0..F-1)
+                        # The cross-attention mask from attention_blend already carries exactly one grid's
+                        # worth of frames (mask.shape[1] == grid_sizeH*grid_sizeW). It is grid-agnostic, so
+                        # take the available frames for the current grid. (Previously this sliced
+                        # mask[:, _j*_g:(_j+1)*_g] assuming 2*_g frames -> empty for cur_grid_idx=1 -> crash.)
                         _g = grid_sizeH * grid_sizeW
-                        _j = getattr(self, 'cur_grid_idx', 0)
-                        mask = mask[:, _j*_g:(_j+1)*_g]
+                        mask = mask[:, :_g]
                         mask=mask.unsqueeze(1)
-                        mask=grid.combine_frames_in_grid(mask,grid_sizeH,grid_sizeW)
-                        mask=mask.squeeze(1)
-                        reshaped_mask = rearrange(mask, "d c h w -> c d (h w)")[..., None]
-                    else: 
+                        if mask.numel() == 0:  # safety: degenerate mask -> skip blend this step
+                            reshaped_mask = None
+                        else:
+                            mask=grid.combine_frames_in_grid(mask,grid_sizeH,grid_sizeW)
+                            mask=mask.squeeze(1)
+                            reshaped_mask = rearrange(mask, "d c h w -> c d (h w)")[..., None]
+                    else:
                         reshaped_mask = None
                     attn[0:] = self.replace_self_attention(attn_base, attn_repalce, reshaped_mask)
 
@@ -361,19 +365,21 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
                     save_self_attention = True,
                     disk_store = False,
                     attention_path: str=None,  # 新增参数
-                    fixed_mask=None  # 外接掩码（GroundingDINO+FastSAM），仅作用于 latent_blend
+                    fixed_mask=None,  # 外接掩码（GroundingDINO+FastSAM），仅作用于 latent_blend
+                    fuse_target_attention=False  # Option C: 外接mask与cross-attention mask取并集
                     ) -> AttentionControlEdit:
     if (blend_words is None) or (blend_words == 'None'):
         latent_blend = None
         attention_blend =None
     else:
         if blend_latents:
-            latent_blend = SpatialBlender( prompts, blend_words, 
+            latent_blend = SpatialBlender( prompts, blend_words,
                                        start_blend = 0.2, end_blend=0.8,
                                        tokenizer=tokenizer, th=blend_latents_th, NUM_DDIM_STEPS=NUM_DDIM_STEPS,
                             save_path=save_path+f'/latent_blend_mask',
                             prompt_choose='both',
-                            fixed_mask=fixed_mask)
+                            fixed_mask=fixed_mask,
+                            fuse_target_attention=fuse_target_attention)
             print(f'Blend latent mask with threshold {blend_latents_th}')
         else:
             latent_blend = None
@@ -383,7 +389,8 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
                                                   tokenizer=tokenizer, th=blend_self_th, NUM_DDIM_STEPS=NUM_DDIM_STEPS,
                            save_path=save_path+f'/attention_blend_mask',
                            prompt_choose='source',
-                           fixed_mask=fixed_mask)
+                           fixed_mask=fixed_mask,
+                           fuse_target_attention=fuse_target_attention)
             print(f'Blend self attention mask with threshold {blend_self_th}')
         else:
             attention_blend = None

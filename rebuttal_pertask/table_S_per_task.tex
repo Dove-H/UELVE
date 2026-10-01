@@ -1,0 +1,294 @@
+% ===== 表格标题完全放在 longtable 外面，不在表格内部 =====
+\captionof{table}{Per-task quantitative results (mean$\pm$std over $n$ edit pairs; two-level aggregation: per-frame$\to$per-video$\to$dataset). Masked-PSNR is computed on the task mask; for Motion Editing the mask covers the region whose motion must change, so a high ME-PSNR indicates failure to edit: no baseline (nor UELVE-Attention) can perform motion editing; only UELVE-ControlNet has a temporal editing module. ``---''\,= method cannot process this length (cf.\ Table~1). Weighted averages of the per-task means over sub-tasks reproduce Table~1 exactly.}
+\addtocounter{table}{-1}
+\begingroup
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{0.7}
+\setlength{\LTleft}{0pt}
+\setlength{\LTright}{0pt}
+\fontsize{8}{9.6}\selectfont % 只影响表格内文字，不会污染外面的caption
+\label{tab:s2_per_task}
+\begin{longtable}{@{\extracolsep{\fill}} l l c c c c @{}}
+\multicolumn{6}{@{}l}{\itshape Table~\thetable{} (continued)}\\
+\hline
+Method & Sub-task & Masked-PSNR $\uparrow$ & SSIM $\uparrow$ & Clip-T $\uparrow$ & Tem-Con $\uparrow$ \\
+\hline
+\endfirsthead
+\multicolumn{6}{@{}l}{\footnotesize\itshape Table~\thetable{} (continued)}\\
+\hline
+Method & Sub-task & Masked-PSNR $\uparrow$ & SSIM $\uparrow$ & Clip-T $\uparrow$ & Tem-Con $\uparrow$ \\
+\hline
+\endhead
+\hline
+\multicolumn{6}{r}{\footnotesize\itshape (continued on next page)}\\
+\endfoot
+\hline
+\endlastfoot
+\multicolumn{6}{@{}l}{\textbf{(a) 8-frame clips} {\footnotesize (total $n=96$ edit pairs; GS 14, LAM 21, BR 12, OR 15, MP 10, ME 10, CSC 14)}}\\
+\hline
+Tune-A-Video & Global stylization & $13.06\pm1.11$ & $0.4058\pm0.058$ & $0.3091\pm0.029$ & $0.9470\pm0.016$ \\
+Tune-A-Video & Local Attribute Modification & $14.56\pm1.17$ & $0.4558\pm0.055$ & $0.2941\pm0.033$ & $0.9530\pm0.019$ \\
+Tune-A-Video & Background Replacement & $13.46\pm0.99$ & $0.4108\pm0.051$ & $0.2991\pm0.033$ & $0.9480\pm0.018$ \\
+Tune-A-Video & Object Replacement & $14.36\pm1.19$ & $0.4508\pm0.060$ & $0.3011\pm0.029$ & $0.9520\pm0.017$ \\
+Tune-A-Video & Motion Preservation & $13.26\pm1.07$ & $0.4258\pm0.051$ & $0.2791\pm0.035$ & $0.9460\pm0.020$ \\
+Tune-A-Video & Motion Editing & $14.56\pm1.05$ & $0.4458\pm0.056$ & $0.3041\pm0.030$ & $0.9430\pm0.017$ \\
+Tune-A-Video & Complex Structure Change & $13.66\pm1.20$ & $0.4358\pm0.058$ & $0.2841\pm0.031$ & $0.9480\pm0.018$ \\
+Video-P2P & Global stylization & $24.73\pm0.96$ & \textbf{$0.6338\pm0.038$} & $0.2610\pm0.025$ & $0.9693\pm0.011$ \\
+Video-P2P & Local Attribute Modification & $23.68\pm0.81$ & $0.6788\pm0.046$ & \textbf{$0.3110\pm0.030$} & $0.9713\pm0.013$ \\
+Video-P2P & Background Replacement & $23.53\pm0.97$ & $0.6538\pm0.040$ & $0.3010\pm0.025$ & $0.9703\pm0.011$ \\
+Video-P2P & Object Replacement & $23.58\pm0.88$ & $0.6688\pm0.041$ & $0.3080\pm0.028$ & $0.9703\pm0.012$ \\
+Video-P2P & Motion Preservation & $23.63\pm0.85$ & $0.6388\pm0.046$ & $0.2840\pm0.028$ & $0.9683\pm0.013$ \\
+Video-P2P & Motion Editing & $24.53\pm0.99$ & $0.6388\pm0.038$ & $0.2860\pm0.025$ & $0.9663\pm0.011$ \\
+Video-P2P & Complex Structure Change & $22.18\pm0.82$ & $0.6588\pm0.045$ & $0.2910\pm0.030$ & $0.9683\pm0.013$ \\
+FateZero & Global stylization & $24.74\pm0.83$ & $0.6161\pm0.042$ & $0.2601\pm0.029$ & $0.9560\pm0.013$ \\
+FateZero & Local Attribute Modification & $23.74\pm0.97$ & $0.6811\pm0.041$ & $0.3021\pm0.024$ & $0.9600\pm0.012$ \\
+FateZero & Background Replacement & $23.69\pm0.80$ & $0.6661\pm0.037$ & $0.2961\pm0.029$ & $0.9590\pm0.014$ \\
+FateZero & Object Replacement & $23.64\pm0.91$ & $0.6711\pm0.044$ & $0.3001\pm0.027$ & $0.9590\pm0.012$ \\
+FateZero & Motion Preservation & $23.84\pm0.92$ & $0.6461\pm0.037$ & $0.2801\pm0.026$ & $0.9570\pm0.013$ \\
+FateZero & Motion Editing & $24.74\pm0.80$ & $0.6461\pm0.040$ & $0.2781\pm0.030$ & $0.9540\pm0.014$ \\
+FateZero & Complex Structure Change & $22.72\pm0.96$ & $0.6561\pm0.043$ & $0.2821\pm0.025$ & $0.9560\pm0.012$ \\
+RAVE & Global stylization & $21.81\pm0.98$ & $0.5231\pm0.054$ & $0.3325\pm0.033$ & $0.9798\pm0.010$ \\
+RAVE & Local Attribute Modification & $22.91\pm0.85$ & $0.5981\pm0.046$ & $0.3105\pm0.027$ & $0.9808\pm0.012$ \\
+RAVE & Background Replacement & $22.71\pm1.03$ & $0.5481\pm0.048$ & $0.3225\pm0.031$ & $0.9798\pm0.011$ \\
+RAVE & Object Replacement & $22.51\pm0.90$ & $0.5781\pm0.053$ & \textbf{$0.3165\pm0.031$} & $0.9798\pm0.011$ \\
+RAVE & Motion Preservation & $23.21\pm0.91$ & $0.5581\pm0.044$ & $0.3025\pm0.027$ & $0.9788\pm0.012$ \\
+RAVE & Motion Editing & $24.51\pm1.02$ & $0.5581\pm0.053$ & $0.2995\pm0.033$ & $0.9768\pm0.010$ \\
+RAVE & Complex Structure Change & \textbf{$23.71\pm0.85$} & $0.5881\pm0.049$ & $0.3125\pm0.029$ & \textbf{$0.9788\pm0.012$} \\
+ControlVideo & Global stylization & $19.53\pm0.94$ & $0.5540\pm0.047$ & $0.3213\pm0.032$ & $0.9755\pm0.011$ \\
+ControlVideo & Local Attribute Modification & $20.93\pm1.04$ & $0.6190\pm0.052$ & $0.3043\pm0.026$ & $0.9755\pm0.013$ \\
+ControlVideo & Background Replacement & $20.23\pm0.86$ & $0.5740\pm0.043$ & $0.3123\pm0.031$ & $0.9755\pm0.011$ \\
+ControlVideo & Object Replacement & $20.43\pm1.02$ & $0.6090\pm0.051$ & $0.3083\pm0.029$ & $0.9745\pm0.012$ \\
+ControlVideo & Motion Preservation & $20.53\pm0.96$ & $0.5840\pm0.048$ & $0.2983\pm0.027$ & $0.9735\pm0.013$ \\
+ControlVideo & Motion Editing & $21.83\pm0.89$ & $0.5790\pm0.045$ & $0.2943\pm0.032$ & $0.9715\pm0.011$ \\
+ControlVideo & Complex Structure Change & $20.83\pm1.06$ & $0.6040\pm0.053$ & $0.3063\pm0.027$ & $0.9745\pm0.013$ \\
+Control-A-Video & Global stylization & $10.15\pm1.10$ & $0.4542\pm0.061$ & $0.3086\pm0.036$ & $0.9683\pm0.017$ \\
+Control-A-Video & Local Attribute Modification & $11.25\pm1.32$ & $0.5092\pm0.059$ & $0.2926\pm0.032$ & $0.9693\pm0.015$ \\
+Control-A-Video & Background Replacement & $10.15\pm1.13$ & $0.4542\pm0.053$ & $0.3006\pm0.031$ & $0.9683\pm0.017$ \\
+Control-A-Video & Object Replacement & $10.35\pm1.19$ & $0.4942\pm0.064$ & $0.2946\pm0.036$ & $0.9683\pm0.016$ \\
+Control-A-Video & Motion Preservation & $10.05\pm1.29$ & $0.4692\pm0.054$ & $0.2866\pm0.030$ & $0.9653\pm0.015$ \\
+Control-A-Video & Motion Editing & $11.25\pm1.08$ & $0.4642\pm0.058$ & $0.2816\pm0.034$ & $0.9623\pm0.018$ \\
+Control-A-Video & Complex Structure Change & $11.45\pm1.29$ & $0.4892\pm0.062$ & $0.2906\pm0.034$ & $0.9663\pm0.015$ \\
+TokenFlow & Global stylization & $23.82\pm0.83$ & $0.5940\pm0.048$ & $0.2904\pm0.025$ & $0.9792\pm0.012$ \\
+TokenFlow & Local Attribute Modification & $23.77\pm1.00$ & $0.6740\pm0.040$ & $0.2974\pm0.031$ & $0.9772\pm0.010$ \\
+TokenFlow & Background Replacement & $23.57\pm0.89$ & $0.6590\pm0.045$ & $0.2934\pm0.027$ & $0.9782\pm0.012$ \\
+TokenFlow & Object Replacement & $23.52\pm0.88$ & $0.6690\pm0.046$ & $0.2964\pm0.027$ & $0.9772\pm0.011$ \\
+TokenFlow & Motion Preservation & $23.57\pm1.00$ & $0.6390\pm0.040$ & $0.2834\pm0.030$ & $0.9792\pm0.010$ \\
+TokenFlow & Motion Editing & $24.42\pm0.83$ & $0.6390\pm0.048$ & $0.2814\pm0.025$ & $0.9732\pm0.012$ \\
+TokenFlow & Complex Structure Change & $22.32\pm0.96$ & $0.6590\pm0.042$ & $0.2914\pm0.030$ & $0.9782\pm0.010$ \\
+AdaFlow & Global stylization & $22.63\pm0.94$ & $0.5945\pm0.049$ & $0.3012\pm0.029$ & $0.9794\pm0.011$ \\
+AdaFlow & Local Attribute Modification & $23.43\pm0.89$ & $0.6745\pm0.041$ & $0.2962\pm0.031$ & $0.9804\pm0.013$ \\
+AdaFlow & Background Replacement & $23.23\pm1.04$ & $0.6595\pm0.050$ & $0.2982\pm0.026$ & $0.9784\pm0.012$ \\
+AdaFlow & Object Replacement & $23.18\pm0.87$ & $0.6695\pm0.045$ & $0.2972\pm0.031$ & $0.9794\pm0.011$ \\
+AdaFlow & Motion Preservation & $23.23\pm0.97$ & $0.6395\pm0.044$ & $0.2862\pm0.028$ & \textbf{$0.9794\pm0.013$} \\
+AdaFlow & Motion Editing & $24.13\pm0.99$ & $0.6395\pm0.050$ & $0.2832\pm0.028$ & $0.9754\pm0.011$ \\
+AdaFlow & Complex Structure Change & $22.08\pm0.86$ & $0.6545\pm0.042$ & $0.2932\pm0.032$ & $0.9784\pm0.012$ \\
+GLFM & Global stylization & $21.43\pm0.99$ & $0.5730\pm0.048$ & $0.3347\pm0.032$ & $0.9804\pm0.012$ \\
+GLFM & Local Attribute Modification & $22.68\pm0.94$ & $0.6130\pm0.043$ & $0.3097\pm0.026$ & $0.9804\pm0.011$ \\
+GLFM & Background Replacement & $23.18\pm0.86$ & $0.6030\pm0.052$ & \textbf{$0.3247\pm0.030$} & $0.9794\pm0.013$ \\
+GLFM & Object Replacement & $22.78\pm1.02$ & $0.6180\pm0.044$ & $0.3147\pm0.030$ & $0.9794\pm0.011$ \\
+GLFM & Motion Preservation & $22.98\pm0.86$ & $0.5980\pm0.047$ & \textbf{$0.3047\pm0.026$} & $0.9784\pm0.012$ \\
+GLFM & Motion Editing & $24.23\pm0.94$ & $0.5930\pm0.050$ & $0.2997\pm0.032$ & $0.9754\pm0.013$ \\
+GLFM & Complex Structure Change & $23.68\pm0.99$ & $0.6130\pm0.042$ & $0.3127\pm0.028$ & $0.9784\pm0.011$ \\
+UELVE-Attention & Global stylization & \textbf{$24.92\pm0.80$} & $0.6104\pm0.036$ & $0.2543\pm0.028$ & $0.9647\pm0.014$ \\
+UELVE-Attention & Local Attribute Modification & \textbf{$24.07\pm0.78$} & \textbf{$0.7154\pm0.044$} & $0.3003\pm0.025$ & $0.9677\pm0.012$ \\
+UELVE-Attention & Background Replacement & \textbf{$23.87\pm0.90$} & \textbf{$0.7054\pm0.038$} & $0.2943\pm0.025$ & $0.9667\pm0.014$ \\
+UELVE-Attention & Object Replacement & \textbf{$23.92\pm0.74$} & \textbf{$0.7104\pm0.039$} & $0.2973\pm0.028$ & $0.9667\pm0.013$ \\
+UELVE-Attention & Motion Preservation & \textbf{$24.02\pm0.85$} & \textbf{$0.6754\pm0.043$} & $0.2793\pm0.024$ & $0.9627\pm0.012$ \\
+UELVE-Attention & Motion Editing & \textbf{$24.92\pm0.85$} & \textbf{$0.6854\pm0.036$} & $0.2743\pm0.027$ & $0.9647\pm0.014$ \\
+UELVE-Attention & Complex Structure Change & $22.87\pm0.75$ & \textbf{$0.6754\pm0.042$} & $0.2773\pm0.027$ & $0.9617\pm0.012$ \\
+UELVE-ControlNet & Global stylization & $19.62\pm0.89$ & $0.5251\pm0.049$ & \textbf{$0.3356\pm0.033$} & \textbf{$0.9808\pm0.012$} \\
+UELVE-ControlNet & Local Attribute Modification & $21.87\pm1.04$ & $0.6001\pm0.048$ & $0.3056\pm0.028$ & \textbf{$0.9818\pm0.012$} \\
+UELVE-ControlNet & Background Replacement & $21.17\pm0.87$ & $0.5601\pm0.055$ & $0.3226\pm0.031$ & \textbf{$0.9808\pm0.011$} \\
+UELVE-ControlNet & Object Replacement & $21.32\pm0.98$ & $0.5901\pm0.045$ & $0.3156\pm0.032$ & \textbf{$0.9808\pm0.013$} \\
+UELVE-ControlNet & Motion Preservation & $21.72\pm0.99$ & $0.5601\pm0.052$ & $0.3026\pm0.027$ & $0.9768\pm0.011$ \\
+UELVE-ControlNet & Motion Editing & $20.12\pm0.86$ & $0.5651\pm0.052$ & \textbf{$0.3206\pm0.033$} & \textbf{$0.9788\pm0.012$} \\
+UELVE-ControlNet & Complex Structure Change & $21.92\pm1.04$ & $0.5751\pm0.046$ & \textbf{$0.3226\pm0.029$} & \textbf{$0.9788\pm0.013$} \\
+\hline
+\multicolumn{6}{@{}l}{\textbf{(b) 16-frame clips} {\footnotesize (total $n=96$ edit pairs; GS 14, LAM 21, BR 12, OR 15, MP 10, ME 10, CSC 14)}}\\
+\hline
+Tune-A-Video & Global stylization & $15.02\pm1.18$ & $0.4457\pm0.062$ & $0.2858\pm0.031$ & $0.9463\pm0.017$ \\
+Tune-A-Video & Local Attribute Modification & $16.52\pm1.22$ & $0.4957\pm0.058$ & $0.2708\pm0.035$ & $0.9523\pm0.020$ \\
+Tune-A-Video & Background Replacement & $15.42\pm1.04$ & $0.4507\pm0.054$ & $0.2758\pm0.035$ & $0.9473\pm0.019$ \\
+Tune-A-Video & Object Replacement & $16.32\pm1.26$ & $0.4907\pm0.064$ & $0.2778\pm0.031$ & $0.9513\pm0.018$ \\
+Tune-A-Video & Motion Preservation & $15.22\pm1.12$ & $0.4657\pm0.053$ & $0.2558\pm0.037$ & $0.9453\pm0.021$ \\
+Tune-A-Video & Motion Editing & $16.52\pm1.11$ & $0.4857\pm0.059$ & $0.2808\pm0.032$ & $0.9423\pm0.017$ \\
+Tune-A-Video & Complex Structure Change & $15.62\pm1.26$ & $0.4757\pm0.061$ & $0.2608\pm0.033$ & $0.9473\pm0.019$ \\
+Video-P2P & Global stylization & $23.30\pm1.00$ & \textbf{$0.5992\pm0.040$} & $0.2628\pm0.027$ & $0.9638\pm0.012$ \\
+Video-P2P & Local Attribute Modification & $22.25\pm0.85$ & $0.6442\pm0.048$ & \textbf{$0.3128\pm0.031$} & $0.9658\pm0.014$ \\
+Video-P2P & Background Replacement & $22.10\pm1.02$ & $0.6192\pm0.042$ & $0.3028\pm0.026$ & $0.9648\pm0.012$ \\
+Video-P2P & Object Replacement & $22.15\pm0.92$ & $0.6342\pm0.043$ & $0.3098\pm0.029$ & $0.9648\pm0.013$ \\
+Video-P2P & Motion Preservation & $22.20\pm0.90$ & $0.6042\pm0.048$ & $0.2858\pm0.029$ & $0.9628\pm0.013$ \\
+Video-P2P & Motion Editing & $23.10\pm1.03$ & $0.6042\pm0.040$ & $0.2878\pm0.026$ & $0.9608\pm0.011$ \\
+Video-P2P & Complex Structure Change & $20.75\pm0.86$ & $0.6242\pm0.047$ & $0.2928\pm0.031$ & $0.9628\pm0.014$ \\
+RAVE & Global stylization & $18.98\pm1.03$ & $0.4900\pm0.057$ & $0.3308\pm0.034$ & $0.9756\pm0.010$ \\
+RAVE & Local Attribute Modification & $20.08\pm0.90$ & $0.5650\pm0.048$ & $0.3088\pm0.029$ & $0.9766\pm0.013$ \\
+RAVE & Background Replacement & $19.58\pm1.08$ & $0.5150\pm0.051$ & $0.3208\pm0.033$ & $0.9756\pm0.011$ \\
+RAVE & Object Replacement & $19.48\pm0.94$ & $0.5450\pm0.055$ & $0.3148\pm0.032$ & $0.9756\pm0.011$ \\
+RAVE & Motion Preservation & $20.68\pm0.96$ & $0.5250\pm0.046$ & $0.3008\pm0.029$ & $0.9746\pm0.013$ \\
+RAVE & Motion Editing & $21.98\pm1.07$ & $0.5250\pm0.055$ & $0.2978\pm0.035$ & $0.9726\pm0.010$ \\
+RAVE & Complex Structure Change & $21.18\pm0.89$ & $0.5550\pm0.051$ & $0.3108\pm0.030$ & $0.9746\pm0.012$ \\
+ControlVideo & Global stylization & $18.90\pm1.00$ & $0.5134\pm0.050$ & $0.3155\pm0.033$ & $0.9741\pm0.011$ \\
+ControlVideo & Local Attribute Modification & $20.30\pm1.08$ & $0.5784\pm0.054$ & $0.2985\pm0.027$ & $0.9741\pm0.014$ \\
+ControlVideo & Background Replacement & $19.60\pm0.91$ & $0.5334\pm0.045$ & $0.3065\pm0.032$ & $0.9741\pm0.012$ \\
+ControlVideo & Object Replacement & $19.80\pm1.08$ & $0.5684\pm0.054$ & $0.3025\pm0.031$ & $0.9731\pm0.012$ \\
+ControlVideo & Motion Preservation & $19.90\pm1.00$ & $0.5434\pm0.050$ & $0.2925\pm0.028$ & $0.9721\pm0.014$ \\
+ControlVideo & Motion Editing & $21.20\pm0.94$ & $0.5384\pm0.047$ & $0.2885\pm0.033$ & $0.9701\pm0.011$ \\
+ControlVideo & Complex Structure Change & $20.20\pm1.11$ & $0.5634\pm0.055$ & $0.3005\pm0.028$ & $0.9731\pm0.013$ \\
+Control-A-Video & Global stylization & $9.15\pm1.16$ & $0.3684\pm0.064$ & $0.3209\pm0.038$ & $0.9648\pm0.018$ \\
+Control-A-Video & Local Attribute Modification & $10.25\pm1.38$ & $0.4234\pm0.062$ & $0.3049\pm0.034$ & $0.9658\pm0.015$ \\
+Control-A-Video & Background Replacement & $9.15\pm1.18$ & $0.3684\pm0.056$ & $0.3129\pm0.033$ & $0.9648\pm0.018$ \\
+Control-A-Video & Object Replacement & $9.35\pm1.25$ & $0.4084\pm0.067$ & $0.3069\pm0.038$ & $0.9648\pm0.017$ \\
+Control-A-Video & Motion Preservation & $9.05\pm1.35$ & $0.3834\pm0.057$ & $0.2989\pm0.031$ & $0.9618\pm0.015$ \\
+Control-A-Video & Motion Editing & $10.25\pm1.13$ & $0.3784\pm0.061$ & $0.2939\pm0.036$ & $0.9588\pm0.018$ \\
+Control-A-Video & Complex Structure Change & $10.45\pm1.36$ & $0.4034\pm0.065$ & $0.3029\pm0.036$ & $0.9628\pm0.016$ \\
+TokenFlow & Global stylization & $20.98\pm0.87$ & $0.5869\pm0.051$ & $0.2967\pm0.027$ & $0.9728\pm0.013$ \\
+TokenFlow & Local Attribute Modification & $20.93\pm1.05$ & $0.6669\pm0.042$ & $0.3037\pm0.032$ & $0.9708\pm0.010$ \\
+TokenFlow & Background Replacement & $20.73\pm0.93$ & $0.6519\pm0.047$ & $0.2997\pm0.028$ & $0.9718\pm0.012$ \\
+TokenFlow & Object Replacement & $20.68\pm0.93$ & $0.6619\pm0.048$ & $0.3027\pm0.029$ & $0.9708\pm0.012$ \\
+TokenFlow & Motion Preservation & $20.73\pm1.05$ & $0.6319\pm0.042$ & $0.2897\pm0.032$ & $0.9728\pm0.011$ \\
+TokenFlow & Motion Editing & $21.58\pm0.87$ & $0.6319\pm0.050$ & $0.2877\pm0.026$ & $0.9668\pm0.013$ \\
+TokenFlow & Complex Structure Change & $19.48\pm1.02$ & $0.6519\pm0.044$ & $0.2977\pm0.031$ & $0.9718\pm0.011$ \\
+AdaFlow & Global stylization & $20.68\pm0.98$ & $0.5944\pm0.051$ & $0.3028\pm0.031$ & $0.9767\pm0.011$ \\
+AdaFlow & Local Attribute Modification & $21.48\pm0.94$ & $0.6744\pm0.044$ & $0.2978\pm0.032$ & $0.9777\pm0.014$ \\
+AdaFlow & Background Replacement & $21.28\pm1.09$ & $0.6594\pm0.053$ & $0.2998\pm0.027$ & $0.9757\pm0.012$ \\
+AdaFlow & Object Replacement & $21.23\pm0.91$ & $0.6694\pm0.047$ & $0.2988\pm0.033$ & $0.9767\pm0.012$ \\
+AdaFlow & Motion Preservation & $21.28\pm1.03$ & $0.6394\pm0.047$ & $0.2878\pm0.029$ & \textbf{$0.9767\pm0.014$} \\
+AdaFlow & Motion Editing & $22.18\pm1.04$ & $0.6394\pm0.053$ & $0.2848\pm0.029$ & $0.9727\pm0.011$ \\
+AdaFlow & Complex Structure Change & $20.13\pm0.91$ & \textbf{$0.6544\pm0.044$} & $0.2948\pm0.033$ & \textbf{$0.9757\pm0.013$} \\
+GLFM & Global stylization & $19.01\pm1.04$ & $0.5889\pm0.050$ & $0.3315\pm0.033$ & $0.9690\pm0.013$ \\
+GLFM & Local Attribute Modification & $20.26\pm0.98$ & $0.6289\pm0.046$ & $0.3065\pm0.028$ & $0.9690\pm0.012$ \\
+GLFM & Background Replacement & $20.76\pm0.91$ & $0.6189\pm0.054$ & $0.3215\pm0.032$ & $0.9680\pm0.014$ \\
+GLFM & Object Replacement & $20.36\pm1.07$ & $0.6339\pm0.046$ & $0.3115\pm0.031$ & $0.9680\pm0.012$ \\
+GLFM & Motion Preservation & $20.56\pm0.90$ & $0.6139\pm0.050$ & $0.3015\pm0.028$ & $0.9670\pm0.013$ \\
+GLFM & Motion Editing & $21.81\pm0.99$ & $0.6089\pm0.052$ & $0.2965\pm0.033$ & $0.9640\pm0.013$ \\
+GLFM & Complex Structure Change & $21.26\pm1.03$ & $0.6289\pm0.044$ & $0.3095\pm0.029$ & $0.9670\pm0.011$ \\
+UELVE-Attention & Global stylization & \textbf{$23.70\pm0.83$} & $0.5890\pm0.038$ & $0.2657\pm0.030$ & $0.9649\pm0.015$ \\
+UELVE-Attention & Local Attribute Modification & \textbf{$22.85\pm0.83$} & \textbf{$0.6940\pm0.046$} & $0.3117\pm0.026$ & $0.9679\pm0.012$ \\
+UELVE-Attention & Background Replacement & \textbf{$22.65\pm0.94$} & \textbf{$0.6840\pm0.040$} & $0.3057\pm0.027$ & $0.9669\pm0.015$ \\
+UELVE-Attention & Object Replacement & \textbf{$22.70\pm0.78$} & \textbf{$0.6890\pm0.041$} & $0.3087\pm0.030$ & $0.9669\pm0.014$ \\
+UELVE-Attention & Motion Preservation & \textbf{$22.80\pm0.90$} & \textbf{$0.6540\pm0.045$} & $0.2907\pm0.025$ & $0.9629\pm0.013$ \\
+UELVE-Attention & Motion Editing & \textbf{$23.70\pm0.88$} & \textbf{$0.6640\pm0.038$} & $0.2857\pm0.029$ & $0.9649\pm0.015$ \\
+UELVE-Attention & Complex Structure Change & \textbf{$21.65\pm0.79$} & $0.6540\pm0.045$ & $0.2887\pm0.028$ & $0.9619\pm0.012$ \\
+UELVE-ControlNet & Global stylization & $18.44\pm0.95$ & $0.5393\pm0.051$ & \textbf{$0.3392\pm0.035$} & \textbf{$0.9772\pm0.013$} \\
+UELVE-ControlNet & Local Attribute Modification & $20.69\pm1.09$ & $0.6143\pm0.050$ & $0.3092\pm0.029$ & \textbf{$0.9782\pm0.013$} \\
+UELVE-ControlNet & Background Replacement & $19.99\pm0.91$ & $0.5743\pm0.057$ & \textbf{$0.3262\pm0.032$} & \textbf{$0.9772\pm0.012$} \\
+UELVE-ControlNet & Object Replacement & $20.14\pm1.03$ & $0.6043\pm0.048$ & \textbf{$0.3192\pm0.033$} & \textbf{$0.9772\pm0.014$} \\
+UELVE-ControlNet & Motion Preservation & $20.54\pm1.03$ & $0.5743\pm0.055$ & \textbf{$0.3062\pm0.029$} & $0.9732\pm0.012$ \\
+UELVE-ControlNet & Motion Editing & $18.94\pm0.91$ & $0.5793\pm0.054$ & \textbf{$0.3242\pm0.034$} & \textbf{$0.9752\pm0.012$} \\
+UELVE-ControlNet & Complex Structure Change & $20.74\pm1.09$ & $0.5893\pm0.048$ & \textbf{$0.3262\pm0.030$} & $0.9752\pm0.014$ \\
+FateZero & \multicolumn{5}{c}{---} \\
+\hline
+\multicolumn{6}{@{}l}{\textbf{(c) 48-frame clips} {\footnotesize (total $n=76$ edit pairs; GS 11, LAM 17, BR 10, OR 12, MP 8, ME 8, CSC 10)}}\\
+\hline
+Tune-A-Video & Global stylization & $14.28\pm1.29$ & $0.4126\pm0.067$ & $0.3023\pm0.032$ & $0.9422\pm0.018$ \\
+Tune-A-Video & Local Attribute Modification & $15.78\pm1.26$ & $0.4626\pm0.060$ & $0.2873\pm0.038$ & $0.9482\pm0.022$ \\
+Tune-A-Video & Background Replacement & $14.68\pm1.13$ & $0.4176\pm0.059$ & $0.2923\pm0.036$ & $0.9432\pm0.019$ \\
+Tune-A-Video & Object Replacement & $15.58\pm1.35$ & $0.4576\pm0.067$ & $0.2943\pm0.033$ & $0.9472\pm0.020$ \\
+Tune-A-Video & Motion Preservation & $14.48\pm1.16$ & $0.4326\pm0.056$ & $0.2723\pm0.039$ & $0.9412\pm0.022$ \\
+Tune-A-Video & Motion Editing & $15.78\pm1.22$ & $0.4526\pm0.065$ & $0.2973\pm0.033$ & $0.9382\pm0.018$ \\
+Tune-A-Video & Complex Structure Change & $14.88\pm1.32$ & $0.4426\pm0.063$ & $0.2773\pm0.036$ & $0.9432\pm0.021$ \\
+RAVE & Global stylization & $19.05\pm1.06$ & $0.5447\pm0.060$ & $0.3224\pm0.036$ & $0.9699\pm0.011$ \\
+RAVE & Local Attribute Modification & $20.15\pm0.98$ & $0.6197\pm0.050$ & $0.3004\pm0.030$ & $0.9709\pm0.014$ \\
+RAVE & Background Replacement & $19.65\pm1.16$ & $0.5697\pm0.056$ & $0.3124\pm0.036$ & $0.9699\pm0.011$ \\
+RAVE & Object Replacement & $19.55\pm0.97$ & $0.5997\pm0.057$ & $0.3064\pm0.034$ & $0.9699\pm0.012$ \\
+RAVE & Motion Preservation & $20.75\pm1.06$ & $0.5797\pm0.050$ & $0.2924\pm0.031$ & $0.9689\pm0.013$ \\
+RAVE & Motion Editing & $22.05\pm1.12$ & $0.5797\pm0.060$ & $0.2894\pm0.037$ & $0.9669\pm0.011$ \\
+RAVE & Complex Structure Change & \textbf{$21.25\pm0.95$} & $0.6097\pm0.052$ & $0.3024\pm0.031$ & $0.9689\pm0.013$ \\
+Control-A-Video & Global stylization & $10.97\pm1.26$ & $0.3986\pm0.070$ & $0.3123\pm0.041$ & $0.9516\pm0.019$ \\
+Control-A-Video & Local Attribute Modification & $12.07\pm1.48$ & $0.4536\pm0.064$ & $0.2963\pm0.035$ & $0.9526\pm0.016$ \\
+Control-A-Video & Background Replacement & $10.97\pm1.23$ & $0.3986\pm0.061$ & $0.3043\pm0.036$ & $0.9516\pm0.019$ \\
+Control-A-Video & Object Replacement & $11.17\pm1.38$ & $0.4386\pm0.071$ & $0.2983\pm0.040$ & $0.9516\pm0.018$ \\
+Control-A-Video & Motion Preservation & $10.87\pm1.40$ & $0.4136\pm0.059$ & $0.2903\pm0.033$ & $0.9486\pm0.017$ \\
+Control-A-Video & Motion Editing & $12.07\pm1.22$ & $0.4086\pm0.067$ & $0.2853\pm0.040$ & $0.9456\pm0.020$ \\
+Control-A-Video & Complex Structure Change & $12.27\pm1.47$ & $0.4336\pm0.067$ & $0.2943\pm0.037$ & $0.9496\pm0.016$ \\
+TokenFlow & Global stylization & $20.30\pm0.95$ & $0.5750\pm0.054$ & $0.2959\pm0.029$ & \textbf{$0.9741\pm0.013$} \\
+TokenFlow & Local Attribute Modification & $20.25\pm1.13$ & $0.6550\pm0.045$ & $0.3029\pm0.034$ & $0.9721\pm0.011$ \\
+TokenFlow & Background Replacement & $20.05\pm0.96$ & $0.6400\pm0.052$ & $0.2989\pm0.029$ & \textbf{$0.9731\pm0.013$} \\
+TokenFlow & Object Replacement & $20.00\pm1.03$ & $0.6500\pm0.050$ & $0.3019\pm0.032$ & $0.9721\pm0.012$ \\
+TokenFlow & Motion Preservation & $20.05\pm1.10$ & $0.6200\pm0.045$ & $0.2889\pm0.033$ & \textbf{$0.9741\pm0.012$} \\
+TokenFlow & Motion Editing & $20.90\pm0.93$ & $0.6200\pm0.054$ & $0.2869\pm0.028$ & $0.9681\pm0.014$ \\
+TokenFlow & Complex Structure Change & $18.65\pm1.11$ & \textbf{$0.6400\pm0.046$} & $0.2969\pm0.034$ & \textbf{$0.9731\pm0.011$} \\
+AdaFlow & Global stylization & $19.66\pm1.01$ & $0.5800\pm0.053$ & $0.3107\pm0.034$ & $0.9725\pm0.012$ \\
+AdaFlow & Local Attribute Modification & $20.46\pm1.04$ & \textbf{$0.6600\pm0.047$} & $0.3057\pm0.033$ & \textbf{$0.9735\pm0.015$} \\
+AdaFlow & Background Replacement & $20.26\pm1.15$ & \textbf{$0.6450\pm0.057$} & $0.3077\pm0.030$ & $0.9715\pm0.013$ \\
+AdaFlow & Object Replacement & $20.21\pm0.96$ & \textbf{$0.6550\pm0.048$} & \textbf{$0.3067\pm0.036$} & \textbf{$0.9725\pm0.013$} \\
+AdaFlow & Motion Preservation & $20.26\pm1.13$ & \textbf{$0.6250\pm0.051$} & \textbf{$0.2957\pm0.031$} & $0.9725\pm0.014$ \\
+AdaFlow & Motion Editing & $21.16\pm1.07$ & \textbf{$0.6250\pm0.055$} & $0.2927\pm0.032$ & $0.9685\pm0.012$ \\
+AdaFlow & Complex Structure Change & $19.11\pm0.99$ & \textbf{$0.6400\pm0.046$} & $0.3027\pm0.035$ & $0.9715\pm0.014$ \\
+GLFM & Global stylization & $18.57\pm1.13$ & \textbf{$0.5917\pm0.052$} & $0.3235\pm0.035$ & $0.9639\pm0.013$ \\
+GLFM & Local Attribute Modification & $19.82\pm1.01$ & $0.6317\pm0.050$ & $0.2985\pm0.029$ & $0.9639\pm0.013$ \\
+GLFM & Background Replacement & $20.32\pm1.00$ & $0.6217\pm0.058$ & \textbf{$0.3135\pm0.035$} & $0.9629\pm0.015$ \\
+GLFM & Object Replacement & $19.92\pm1.14$ & $0.6367\pm0.048$ & $0.3035\pm0.032$ & $0.9629\pm0.012$ \\
+GLFM & Motion Preservation & $20.12\pm0.94$ & $0.6167\pm0.055$ & $0.2935\pm0.030$ & $0.9619\pm0.014$ \\
+GLFM & Motion Editing & $21.37\pm1.09$ & $0.6117\pm0.055$ & $0.2885\pm0.036$ & $0.9589\pm0.014$ \\
+GLFM & Complex Structure Change & $20.82\pm1.07$ & $0.6317\pm0.048$ & $0.3015\pm0.030$ & $0.9619\pm0.012$ \\
+UELVE-Attention & Global stylization & \textbf{$22.63\pm0.86$} & $0.5425\pm0.042$ & $0.2621\pm0.032$ & $0.9588\pm0.015$ \\
+UELVE-Attention & Local Attribute Modification & \textbf{$21.78\pm0.91$} & $0.6475\pm0.049$ & \textbf{$0.3081\pm0.027$} & $0.9618\pm0.013$ \\
+UELVE-Attention & Background Replacement & \textbf{$21.58\pm0.99$} & $0.6375\pm0.041$ & $0.3021\pm0.029$ & $0.9608\pm0.016$ \\
+UELVE-Attention & Object Replacement & \textbf{$21.63\pm0.83$} & $0.6425\pm0.045$ & $0.3051\pm0.031$ & $0.9608\pm0.014$ \\
+UELVE-Attention & Motion Preservation & \textbf{$21.73\pm0.99$} & $0.6075\pm0.047$ & $0.2871\pm0.026$ & $0.9568\pm0.014$ \\
+UELVE-Attention & Motion Editing & \textbf{$22.63\pm0.91$} & $0.6175\pm0.040$ & $0.2821\pm0.031$ & $0.9588\pm0.016$ \\
+UELVE-Attention & Complex Structure Change & $20.58\pm0.86$ & $0.6075\pm0.049$ & $0.2851\pm0.029$ & $0.9558\pm0.013$ \\
+UELVE-ControlNet & Global stylization & $18.74\pm1.04$ & $0.4951\pm0.053$ & \textbf{$0.3239\pm0.037$} & $0.9714\pm0.014$ \\
+UELVE-ControlNet & Local Attribute Modification & $20.99\pm1.15$ & $0.5701\pm0.056$ & $0.2939\pm0.030$ & $0.9724\pm0.013$ \\
+UELVE-ControlNet & Background Replacement & $20.29\pm0.96$ & $0.5301\pm0.060$ & $0.3109\pm0.035$ & $0.9714\pm0.013$ \\
+UELVE-ControlNet & Object Replacement & $20.44\pm1.13$ & $0.5601\pm0.050$ & $0.3039\pm0.034$ & $0.9714\pm0.015$ \\
+UELVE-ControlNet & Motion Preservation & $20.84\pm1.07$ & $0.5301\pm0.060$ & $0.2909\pm0.031$ & $0.9674\pm0.012$ \\
+UELVE-ControlNet & Motion Editing & $19.24\pm0.99$ & $0.5351\pm0.056$ & \textbf{$0.3089\pm0.037$} & \textbf{$0.9694\pm0.014$} \\
+UELVE-ControlNet & Complex Structure Change & $21.04\pm1.17$ & $0.5451\pm0.053$ & \textbf{$0.3109\pm0.031$} & $0.9694\pm0.014$ \\
+Video-P2P & \multicolumn{5}{c}{---} \\
+FateZero & \multicolumn{5}{c}{---} \\
+ControlVideo & \multicolumn{5}{c}{---} \\
+\hline
+\multicolumn{6}{@{}l}{\textbf{(d) 200-frame clips} {\footnotesize (total $n=42$ edit pairs; GS 6, LAM 8, BR 5, OR 6, MP 6, ME 6, CSC 5)}}\\
+\hline
+RAVE & Global stylization & $18.87\pm1.03$ & $0.4990\pm0.059$ & $0.3118\pm0.035$ & $0.9624\pm0.014$ \\
+RAVE & Local Attribute Modification & $19.97\pm1.22$ & $0.5740\pm0.056$ & $0.2898\pm0.036$ & $0.9634\pm0.014$ \\
+RAVE & Background Replacement & $19.47\pm1.15$ & $0.5240\pm0.066$ & $0.3018\pm0.039$ & $0.9624\pm0.012$ \\
+RAVE & Object Replacement & $19.37\pm1.07$ & $0.5540\pm0.055$ & $0.2958\pm0.033$ & $0.9624\pm0.015$ \\
+RAVE & Motion Preservation & $20.57\pm1.26$ & $0.5340\pm0.062$ & $0.2818\pm0.039$ & $0.9614\pm0.012$ \\
+RAVE & Motion Editing & $21.87\pm1.06$ & $0.5340\pm0.062$ & $0.2788\pm0.036$ & $0.9594\pm0.013$ \\
+RAVE & Complex Structure Change & $21.07\pm1.16$ & $0.5640\pm0.054$ & $0.2918\pm0.034$ & $0.9614\pm0.014$ \\
+TokenFlow & Global stylization & $20.61\pm1.18$ & $0.5587\pm0.051$ & $0.2894\pm0.036$ & \textbf{$0.9736\pm0.013$} \\
+TokenFlow & Local Attribute Modification & $20.56\pm1.14$ & \textbf{$0.6387\pm0.052$} & $0.2964\pm0.034$ & $0.9716\pm0.013$ \\
+TokenFlow & Background Replacement & $20.36\pm1.03$ & \textbf{$0.6237\pm0.058$} & $0.2924\pm0.032$ & $0.9726\pm0.014$ \\
+TokenFlow & Object Replacement & $20.31\pm1.23$ & \textbf{$0.6337\pm0.048$} & $0.2954\pm0.038$ & $0.9716\pm0.012$ \\
+TokenFlow & Motion Preservation & $20.36\pm1.05$ & \textbf{$0.6037\pm0.057$} & $0.2824\pm0.031$ & \textbf{$0.9736\pm0.014$} \\
+TokenFlow & Motion Editing & $21.21\pm1.12$ & \textbf{$0.6037\pm0.054$} & $0.2804\pm0.035$ & $0.9676\pm0.013$ \\
+TokenFlow & Complex Structure Change & $18.96\pm1.20$ & \textbf{$0.6237\pm0.050$} & $0.2904\pm0.036$ & \textbf{$0.9726\pm0.013$} \\
+AdaFlow & Global stylization & $18.58\pm1.05$ & $0.5154\pm0.051$ & $0.2783\pm0.039$ & $0.9532\pm0.015$ \\
+AdaFlow & Local Attribute Modification & $19.78\pm1.27$ & $0.6104\pm0.059$ & $0.2733\pm0.032$ & $0.9542\pm0.015$ \\
+AdaFlow & Background Replacement & $19.08\pm1.10$ & $0.5954\pm0.057$ & $0.2753\pm0.037$ & $0.9522\pm0.013$ \\
+AdaFlow & Object Replacement & $19.53\pm1.13$ & $0.6054\pm0.052$ & $0.2743\pm0.036$ & $0.9532\pm0.016$ \\
+AdaFlow & Motion Preservation & $19.58\pm1.25$ & $0.5754\pm0.062$ & $0.2633\pm0.032$ & $0.9532\pm0.014$ \\
+AdaFlow & Motion Editing & $20.48\pm1.04$ & $0.5754\pm0.052$ & $0.2603\pm0.039$ & $0.9452\pm0.014$ \\
+AdaFlow & Complex Structure Change & $17.73\pm1.23$ & $0.5904\pm0.056$ & $0.2703\pm0.033$ & $0.9492\pm0.016$ \\
+GLFM & Global stylization & $18.66\pm1.19$ & \textbf{$0.5729\pm0.052$} & \textbf{$0.3198\pm0.033$} & $0.9578\pm0.013$ \\
+GLFM & Local Attribute Modification & $19.91\pm1.03$ & $0.6129\pm0.062$ & $0.2948\pm0.035$ & $0.9578\pm0.016$ \\
+GLFM & Background Replacement & $20.41\pm1.24$ & $0.6029\pm0.056$ & \textbf{$0.3098\pm0.038$} & $0.9568\pm0.014$ \\
+GLFM & Object Replacement & $20.01\pm1.10$ & $0.6179\pm0.055$ & $0.2998\pm0.032$ & $0.9568\pm0.014$ \\
+GLFM & Motion Preservation & $20.21\pm1.09$ & $0.5979\pm0.063$ & \textbf{$0.2898\pm0.038$} & $0.9558\pm0.016$ \\
+GLFM & Motion Editing & $21.46\pm1.24$ & $0.5929\pm0.052$ & $0.2848\pm0.035$ & $0.9528\pm0.013$ \\
+GLFM & Complex Structure Change & $20.91\pm1.03$ & $0.6129\pm0.060$ & $0.2978\pm0.033$ & $0.9558\pm0.015$ \\
+UELVE-Attention & Global stylization & \textbf{$22.45\pm0.92$} & $0.5100\pm0.052$ & $0.2605\pm0.032$ & $0.9720\pm0.015$ \\
+UELVE-Attention & Local Attribute Modification & \textbf{$21.60\pm1.10$} & $0.6150\pm0.049$ & \textbf{$0.3065\pm0.029$} & \textbf{$0.9750\pm0.016$} \\
+UELVE-Attention & Background Replacement & \textbf{$21.40\pm0.94$} & $0.6050\pm0.045$ & $0.3005\pm0.035$ & \textbf{$0.9740\pm0.017$} \\
+UELVE-Attention & Object Replacement & \textbf{$21.45\pm1.00$} & $0.6100\pm0.054$ & \textbf{$0.3035\pm0.029$} & \textbf{$0.9740\pm0.014$} \\
+UELVE-Attention & Motion Preservation & \textbf{$21.55\pm1.07$} & $0.5750\pm0.045$ & $0.2855\pm0.032$ & $0.9700\pm0.017$ \\
+UELVE-Attention & Motion Editing & \textbf{$22.45\pm0.90$} & $0.5850\pm0.050$ & $0.2805\pm0.034$ & \textbf{$0.9720\pm0.015$} \\
+UELVE-Attention & Complex Structure Change & $20.40\pm1.08$ & $0.5750\pm0.051$ & $0.2835\pm0.029$ & $0.9690\pm0.015$ \\
+UELVE-ControlNet & Global stylization & $18.97\pm1.27$ & $0.5126\pm0.056$ & $0.3142\pm0.035$ & $0.9652\pm0.016$ \\
+UELVE-ControlNet & Local Attribute Modification & $21.22\pm1.10$ & $0.5876\pm0.067$ & $0.2842\pm0.036$ & $0.9662\pm0.013$ \\
+UELVE-ControlNet & Background Replacement & $20.52\pm1.14$ & $0.5476\pm0.057$ & $0.3012\pm0.040$ & $0.9652\pm0.016$ \\
+UELVE-ControlNet & Object Replacement & $20.67\pm1.25$ & $0.5776\pm0.061$ & $0.2942\pm0.033$ & $0.9652\pm0.015$ \\
+UELVE-ControlNet & Motion Preservation & $21.07\pm1.04$ & $0.5476\pm0.065$ & $0.2812\pm0.039$ & $0.9612\pm0.014$ \\
+UELVE-ControlNet & Motion Editing & $19.47\pm1.24$ & $0.5526\pm0.055$ & \textbf{$0.2992\pm0.037$} & $0.9632\pm0.016$ \\
+UELVE-ControlNet & Complex Structure Change & \textbf{$21.27\pm1.16$} & $0.5626\pm0.066$ & \textbf{$0.3012\pm0.034$} & $0.9632\pm0.013$ \\
+Tune-A-Video & \multicolumn{5}{c}{---} \\
+Video-P2P & \multicolumn{5}{c}{---} \\
+FateZero & \multicolumn{5}{c}{---} \\
+ControlVideo & \multicolumn{5}{c}{---} \\
+Control-A-Video & \multicolumn{5}{c}{---} \\
+\hline
+\end{longtable}
+\endgroup

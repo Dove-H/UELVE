@@ -284,7 +284,8 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                                 save_self_attention = kwargs.get('save_self_attention', True),
                                 disk_store = kwargs.get('disk_store', False),
                                 attention_path=self.attention_path,  # 传递参数
-                                fixed_mask=getattr(self, 'fixed_mask', None)  # 外接掩码（GroundingDINO+FastSAM）
+                                fixed_mask=getattr(self, 'fixed_mask', None),  # 外接掩码（GroundingDINO+FastSAM）
+                                fuse_target_attention=getattr(self, 'fuse_target_attention', False)  # Option C: 外接mask∪cross-attention mask
                                 )
             attention_util.register_attention_control(self, edit_controller)
             

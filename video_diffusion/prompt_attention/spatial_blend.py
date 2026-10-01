@@ -77,7 +77,7 @@ class SpatialBlender:
         # print("target_h.shape=",target_h)
         
         self.counter += 1
-        if self.fixed_mask is not None:
+        if self.fixed_mask is not None and not self.fuse_target_attention:
             # External precomputed mask (GroundingDINO+FastSAM): bypass cross-attention entirely.
             # Handles both latent blending (x_t given) and self-attention blending (x_t None, target_h/w given).
             return self._blend_with_fixed_mask(x_t, target_h, target_w)
@@ -120,6 +120,13 @@ class SpatialBlender:
         if self.substruct_layers is not None:
             maps_sub = self.get_mask(maps, self.substruct_layers, False)
             mask = mask * maps_sub
+        # ---- Option C: union cross-attention mask with external FastSAM source mask ----
+        # Only active when fixed_mask is given AND fuse_target_attention=True. The cross-attention
+        # mask already covers source (watermelon) ∪ target (pizza) via text; unioning the more precise
+        # FastSAM source mask sharpens the source region. Net gate ≈ FastSAM(source) ∪ attn(target).
+        if self.fixed_mask is not None and self.fuse_target_attention:
+            mask = self._union_fixed(mask, target_h, target_w)
+            mask2 = self._union_fixed(mask2, 64, 64)
         mask = mask.float()
         mask2 = mask2.float()
         # mask is one: use generated information
@@ -155,6 +162,30 @@ class SpatialBlender:
         else:
             return mask
        
+    def _fixed_raw(self, h, w):
+        """External fixed_mask resized to per-frame layout [1, F, h, w] (broadcastable over prompts).
+
+        Matches the get_mask() output layout [P, F, h, w] so it can be OR-ed directly with the
+        cross-attention mask. self.fixed_mask is [F, H, W] in [0,1].
+        """
+        fm = self.fixed_mask
+        if fm.dim() == 2:
+            fm = fm.unsqueeze(0)                                            # [F, H, W]
+        m = F.interpolate(fm.unsqueeze(1).float(), size=(h, w), mode="area")  # [F, 1, h, w]
+        return (m > 0.5).float().permute(1, 0, 2, 3)                        # [1, F, h, w]
+
+    def _union_fixed(self, attn_mask, h, w):
+        """Option C: OR the cross-attention mask with the external fixed_mask.
+
+        attn_mask: get_mask() output, shape [P, F, h, w] (P=1 for 'source', 2 for 'both').
+        Returns the same shape, with the external source-object region merged in.
+        """
+        fixed = self._fixed_raw(h, w).to(device=attn_mask.device, dtype=attn_mask.dtype)  # [1, F, h, w]
+        if fixed.shape[1] != attn_mask.shape[1]:
+            # frame-count mismatch (shouldn't happen) — fall back to per-broadcast on last two dims
+            fixed = fixed.expand(-1, attn_mask.shape[1], -1, -1)
+        return attn_mask.bool() | fixed.bool()
+
     def _blend_with_fixed_mask(self, x_t, target_h=None, target_w=None):
         """External-mask blending (GroundingDINO+FastSAM via mask_utils.gen_masks).
 
@@ -198,7 +229,8 @@ class SpatialBlender:
     def __init__(self, prompts: List[str], words: [List[List[str]]], substruct_words=None,
                  start_blend=0.2, end_blend=0.8,
                  th=(0.9, 0.9), tokenizer=None, NUM_DDIM_STEPS =None,
-                 save_path = None, prompt_choose='source', fixed_mask=None):
+                 save_path = None, prompt_choose='source', fixed_mask=None,
+                 fuse_target_attention=False):
         """
         Args:
             start_blend (float, optional): For latent blending, defaults to 0.2, for attention fusion better to be 0.0
@@ -206,6 +238,11 @@ class SpatialBlender:
             fixed_mask (torch.Tensor, optional): External precomputed per-frame mask [F,H,W] in [0,1]
                 (e.g. from GroundingDINO+FastSAM). If given, latent blending uses it directly and
                 bypasses the cross-attention-derived mask.
+            fuse_target_attention (bool, optional): Option C — only matters when fixed_mask is given.
+                - False (default): external mask REPLACES the cross-attention mask (bypass).
+                - True: external mask (source object, FastSAM) is UNIONED with the cross-attention mask
+                  (which localizes the target object via text, e.g. pizza). Used when the target object is
+                  absent from the source frames and cannot be segmented.
         """
         self.count = 0
         self.MAX_NUM_WORDS = 77
@@ -250,4 +287,5 @@ class SpatialBlender:
         self.th=th
         self.mask_list = []
         self.fixed_mask = fixed_mask.to(device) if fixed_mask is not None else None
+        self.fuse_target_attention = fuse_target_attention
 
