@@ -45,18 +45,18 @@ from mask_utils import gen_masks
 
 # diffusers 路径管理函数
 def setup_diffusers_path(method):
-    """根据 method 参数设置不同的 diffusers 路径"""
-    if method == "FateZero":
-        local_diffusers_path = '/mnt/fspace/hproject/ELVE/diffusersF/'
-    elif method == "ControlNet":
+    """根据 method 参数设置不同的 diffusers 路径。
+    FateZero 直接用 ELVE env pip 装的 0.11.1（旧 diffusersF 目录与之逐字节一致，已删）；
+    MotionEditor 走独立 env（0.15.1）的外部进程，本进程不切 fork；
+    仅 ControlNet 需要切换到 env 外的本地 0.18.2（diffusersC）。"""
+    if method == "ControlNet":
         local_diffusers_path = '/mnt/fspace/hproject/ELVE/diffusersC/'
-    elif method == "MotionEditor":
-        # MotionEditor 用 pip 装的标准 diffusers 0.15.1，不切 fork（独立 pipeline）
+    elif method in ("FateZero", "MotionEditor"):
         return None
     else:
         raise ValueError(f"Unknown method: {method}")
     if local_diffusers_path in sys.path:
-        sys.path.remove(local_diffusers_path)  
+        sys.path.remove(local_diffusers_path)
     sys.path.insert(0, local_diffusers_path)
     return local_diffusers_path
 
@@ -325,6 +325,8 @@ def control_preprocess(image_tensor, accelerator, controlnet, prepare_control_im
         # 将控制图像列表中的torch张量按行拼接，并移动到指定设备上
         control_torch = torch.cat(control_torch_list, dim=0).to(accelerator.device)
         torch.save(control_torch, os.path.join(Control_image_path, 'control.pt'))
+        # 深度图构建完成，释放 annotator 显存给后续 ControlNet 生成
+        pu.unload_preprocess_models()
         print("control_torch.shape=",control_torch.shape)
     return control_torch
 
@@ -727,7 +729,9 @@ def run(config):
     #   one-shot(Motion module)   启动外置 MotionEditor 后直接返回
     # ============================================================
     llm_overrides = {}
-    if Omegadict.get('Use_DeepSeek', False):
+    # DeepSeek(LLM 路由)仅在 FateZero 模式下启用；
+    # method=ControlNet 时无视 Use_DeepSeek，直接走 ControlNet pipeline
+    if method == "FateZero" and Omegadict.get('Use_DeepSeek', False):
         llm_overrides = llm_decision_routing(Omegadict, config)
         if llm_overrides is None:  # 已启动 MotionEditor，不进入 ELVE pipeline
             return

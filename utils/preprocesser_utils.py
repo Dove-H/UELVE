@@ -6,11 +6,19 @@ from annotator.lineart import LineartDetector
 from annotator.zoe import ZoeDetector
 from annotator.manga_line import MangaLineExtration
 from annotator.lineart_anime import LineartAnimeDetector
-from annotator.hed import apply_hed
+from annotator.hed import apply_hed, unload_hed_model
 from annotator.canny import apply_canny
-from annotator.pidinet import apply_pidinet
-from annotator.leres import apply_leres
-from annotator.midas import apply_midas
+from annotator.pidinet import apply_pidinet, unload_pid_model
+from annotator.leres import apply_leres, unload_leres_model
+from annotator.midas import apply_midas, unload_midas_model
+
+# 模块级单例：这些 detector 构建时要读大权重文件并上 GPU（zoe 达 1.4GB），
+# 每帧新建实例会导致逐帧重复"读盘+建模型+搬 GPU"，视频帧数越多浪费越大
+_lineart_detector = None
+_lineart_coarse_detector = None
+_lineart_anime_detector = None
+_manga_line_detector = None
+_zoe_detector = None
 
 
 def yaml_load(path):
@@ -83,37 +91,44 @@ def lineart_standard(img, res=512, **kwargs):
 
 
 def lineart(img, res=512, **kwargs):
-    img, remove_pad = resize_image_with_pad(img, res)    
-    model_lineart = LineartDetector('sk_model.pth')
+    global _lineart_detector
+    img, remove_pad = resize_image_with_pad(img, res)
+    if _lineart_detector is None:
+        _lineart_detector = LineartDetector('sk_model.pth')
 
     # applied auto inversion
-    result = 255 - model_lineart(img)
+    result = 255 - _lineart_detector(img)
     return remove_pad(result), True
 
 
 def lineart_coarse(img, res=512, **kwargs):
+    global _lineart_coarse_detector
     img, remove_pad = resize_image_with_pad(img, res)
-    model_lineart_coarse = LineartDetector('sk_model2.pth')
+    if _lineart_coarse_detector is None:
+        _lineart_coarse_detector = LineartDetector('sk_model2.pth')
 
     # applied auto inversion
-    result = 255 - model_lineart_coarse(img)
+    result = 255 - _lineart_coarse_detector(img)
     return remove_pad(result), True
 
 def lineart_anime(img, res=512, **kwargs):
+    global _lineart_anime_detector
     img, remove_pad = resize_image_with_pad(img, res)
-    model_lineart_anime = LineartAnimeDetector()
+    if _lineart_anime_detector is None:
+        _lineart_anime_detector = LineartAnimeDetector()
 
     # applied auto inversion
-    result = 255 - model_lineart_anime(img)
+    result = 255 - _lineart_anime_detector(img)
     return remove_pad(result), True
 
 
 def lineart_anime_denoise(img, res=512, **kwargs):
+    global _manga_line_detector
     img, remove_pad = resize_image_with_pad(img, res)
-    model_manga_line = MangaLineExtration()
+    if _manga_line_detector is None:
+        _manga_line_detector = MangaLineExtration()
 
-    # applied auto inversion
-    result = model_manga_line(img)
+    result = _manga_line_detector(img)
     return remove_pad(result), True
 
 
@@ -182,10 +197,25 @@ def pidinet_safe(img, res=512, **kwargs):
 
 
 def zoe_depth(img, res=512, **kwargs):
+    global _zoe_detector
     img, remove_pad = resize_image_with_pad(img, res)
-    model_zoe_depth = ZoeDetector()
-    result = model_zoe_depth(img)
+    if _zoe_detector is None:
+        _zoe_detector = ZoeDetector()
+    result = _zoe_detector(img)
     return remove_pad(result), True
+
+
+def unload_preprocess_models():
+    """预处理全部完成后调用：把已加载的 annotator 移回 CPU 释放显存，给后续
+    ControlNet 生成腾空间；实例保留在内存，再需要推理时 __call__ 会自动回 GPU。"""
+    for detector in (_lineart_detector, _lineart_coarse_detector,
+                     _lineart_anime_detector, _manga_line_detector, _zoe_detector):
+        if detector is not None:
+            detector.unload_model()
+    unload_hed_model()
+    unload_pid_model()
+    unload_midas_model()
+    unload_leres_model()
 
 
 preprocessors_dict = {

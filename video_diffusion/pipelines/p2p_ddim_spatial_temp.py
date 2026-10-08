@@ -72,6 +72,8 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
             else:
                 self.attention_path = os.path.join('Attentions', str(GPU_num) + "GPU", os.path.basename(data_path),str(self.video_length))
                 self.latents_path = os.path.join('Latents',str(GPU_num) + "GPU", os.path.basename(data_path),str(self.video_length))
+            # latent 由 store_controller 在 step_callback 中落盘（flag=0）
+            self.store_controller.latents_path = self.latents_path
             
 
         # 初始化分布式环境
@@ -193,9 +195,8 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
             
          
            
-            if self.method=="FateZero":
-                torch.save(latent, os.path.join(
-                            self.latents_path, f'{i}.pt'))  
+            # latent 落盘已移至 AttentionStore.step_callback(flag=0)：保存"本步更新后"的 latent（org 帧布局），
+            # 与旧版 latents_store 语义对齐（此处循环开头保存的是"步前"且处于上一步 indicate 布局，配对错一档）
             if torch.cuda.device_count()>1:
                 latent,indices= self.alternate_multiGPU(latent,i)
                 if self.method=="ControlNet" :
@@ -277,8 +278,10 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                                 additional_attention_store=self.store_controller,
                                 use_inversion_attention = kwargs['use_inversion_attention'],
                                 blend_self_th = kwargs.get('blend_self_th', (0.3, 0.3)),
+                                blend_temp_th = kwargs.get('blend_temp_th', (0.3, 0.3)),
                                 blend_latents_th = kwargs.get('blend_latents_th', (0.3, 0.3)),
                                 blend_self_attention = kwargs.get('blend_self_attention', None),
+                                blend_temp_attention = kwargs.get('blend_temp_attention', None),
                                 blend_latents=kwargs.get('blend_latents', None),
                                 save_path=kwargs.get('save_path', None),
                                 save_self_attention = kwargs.get('save_self_attention', True),
@@ -327,7 +330,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         if self.video_length==self.grid_sizeH*self.grid_sizeW:
             indicate=org
             sqc=org
-        elif flag%2==1 and self.video_length!=self.grid_sizeH*self.grid_sizeW:
+        elif flag%2==0 and self.video_length!=self.grid_sizeH*self.grid_sizeW:
             indicate=alt
             sqc=alt
         else:
@@ -347,7 +350,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         # if self.video_length == self.grid_sizeH *self.grid_sizeW:
         #     indicate = org
         #     sqc = org
-        if flag % 2 == 1:
+        if flag % 2 == 0:
             # 偶数变
             sqc = alt
             if rank == 0:

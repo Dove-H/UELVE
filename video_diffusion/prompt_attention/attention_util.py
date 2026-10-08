@@ -96,6 +96,32 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
 
   
 
+    def replace_temp_attention(self, attn_base, att_replace, reshaped_mask=None):
+
+        if att_replace.shape[1] <= 32 ** 2:
+            target_device = att_replace.device
+            target_dtype  = att_replace.dtype
+            attn_base = attn_base.to(target_device, dtype=target_dtype)
+            attn_base = attn_base.unsqueeze(0).expand(att_replace.shape[0], *attn_base.shape)
+            h = torch.sqrt(torch.tensor(float(attn_base.shape[1]))).int()
+            frames_in_batch=attn_base.shape[-1]
+            attn_base=attn_base.view(1,h,h,8,frames_in_batch,frames_in_batch)
+
+            if reshaped_mask is not None:
+                att_replace=att_replace.view(1,h,h,8,frames_in_batch,frames_in_batch)
+                reshaped_mask=reshaped_mask.unsqueeze(0)
+                return_attention = reshaped_mask*att_replace + (1-reshaped_mask)*attn_base
+                return_attention=return_attention.view(1,h*h,8,frames_in_batch,frames_in_batch)
+                return return_attention
+            else:
+                # 无 temp_blend 掩码时整层替换为 inversion 保存的 temporal attention（FateZero 时序锚定）
+                attn_base=attn_base.unsqueeze(0)
+                attn_base=attn_base.view(1,h*h,8,frames_in_batch,frames_in_batch)
+                return attn_base
+        else:
+            return att_replace
+
+
     @abc.abstractmethod
     def replace_cross_attention(self, attn_base, att_replace):
         raise NotImplementedError
@@ -109,7 +135,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
         super(AttentionControlEdit, self).forward(attn, is_cross, place_in_unet,grid_sizeH,grid_sizeW)
         
         if attn.shape[-2] <= 32 ** 2:
-            key = f"{place_in_unet}_{'self' if is_cross == 1 else 'cross' }"
+            key = f"{place_in_unet}_{'self' if is_cross == 1 else 'cross' if is_cross == 2 else 'temp'}"
             current_pos = self.attention_position_counter_dict[key] #恒为20
             # print("attention_store_all_step=",len(self.additional_attention_store.attention_store_all_step))
             # print("self.cur_step=",self.cur_step) 0到19
@@ -133,7 +159,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
            
             self.update_attention_position_dict(key)
             # save in format of [temp, head, resolution, text_embedding]
-            if is_cross==2  or (self.num_self_replace[0] <= self.cur_step < self.num_self_replace[1]):
+            if is_cross==2 or is_cross==3 or (self.num_self_replace[0] <= self.cur_step < self.num_self_replace[1]):
                 clip_length = attn.shape[0] // (self.batch_size)
                
                 attn = attn.reshape(self.batch_size, clip_length, *attn.shape[1:])
@@ -165,6 +191,21 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                         reshaped_mask = None
                     attn[0:] = self.replace_self_attention(attn_base, attn_repalce, reshaped_mask)
 
+                if is_cross==3 and attn_base.shape[0]<=1024:
+                    if self.temp_blend is not None :
+                            h = int(np.sqrt(attn_repalce.shape[1]))
+                            w = int(np.sqrt(attn_repalce.shape[2]))
+                            mask = self.temp_blend(target_h = h, target_w =w, attention_store= step_in_store_atten_dict, step_in_store=step_in_store)
+
+                            mask = torch.max(mask, dim=1, keepdim=True)[0]
+                            reshaped_mask_temp = mask.view(h, w, 1, 1, 1)
+                    else:
+                        reshaped_mask_temp=None
+                    if not getattr(self, '_temp_replay_logged', False):
+                        print(f"[temp-attn] temporal attention replay engaged: attn_base {tuple(attn_base.shape)} @ step {self.cur_step}")
+                        self._temp_replay_logged = True
+                    attn[0:] = self.replace_temp_attention(attn_base, attn_repalce, reshaped_mask_temp)
+
                 attn = attn.reshape(self.batch_size * clip_length, *attn.shape[2:])
                 # save in format of [temp, head, resolution, text_embedding]
                 
@@ -181,8 +222,10 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
             'down_self': 0,
             'mid_self': 0,
             'up_self': 0,
-           
-        }         
+            'down_temp': 0,
+            'mid_temp': 0,
+            'up_temp': 0,
+        }
         return 
     def __init__(self, prompts, num_steps: int,
                  cross_replace_steps: Union[float, Tuple[float, float], Dict[str, Tuple[float, float]]],
@@ -191,6 +234,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                  additional_attention_store: AttentionStore =None,
                  use_inversion_attention: bool=False,
                  attention_blend: SpatialBlender= None,
+                 temp_blend: SpatialBlender= None,
                  save_self_attention: bool=True,
                  disk_store=False,
                  attention_path: str=None  # 新增参数
@@ -199,6 +243,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
             save_self_attention=save_self_attention,
             disk_store=disk_store,stage=1)
         self.attention_path = attention_path  # 存储
+        self.temp_blend = temp_blend
 
         self.num_steps = num_steps
         self.additional_attention_store = additional_attention_store
@@ -234,7 +279,9 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
             'down_self': 0,
             'mid_self': 0,
             'up_self': 0,
-          
+            'down_temp': 0,
+            'mid_temp': 0,
+            'up_temp': 0,
         }
 
 class AttentionReplace(AttentionControlEdit):
@@ -256,13 +303,14 @@ class AttentionReplace(AttentionControlEdit):
                  additional_attention_store=None,
                  use_inversion_attention = False,
                  attention_blend: SpatialBlender=None,
+                 temp_blend: SpatialBlender = None,
                  save_self_attention: bool = True,
                  disk_store=False,
                  attention_path: str=None  ):
         super(AttentionReplace, self).__init__(
             prompts, num_steps, cross_replace_steps, self_replace_steps, latent_blend, tokenizer=tokenizer,
             additional_attention_store=additional_attention_store, use_inversion_attention = use_inversion_attention,
-            attention_blend=attention_blend,
+            attention_blend=attention_blend,temp_blend=temp_blend,
             save_self_attention = save_self_attention,
             disk_store=disk_store,
             attention_path=attention_path
@@ -288,6 +336,7 @@ class AttentionRefine(AttentionControlEdit):
                  additional_attention_store=None,
                  use_inversion_attention = False,
                  attention_blend: SpatialBlender=None,
+                 temp_blend: SpatialBlender = None,
                  save_self_attention : bool=True,
                  disk_store = False,
                  attention_path: str=None  # 新增参数
@@ -295,7 +344,7 @@ class AttentionRefine(AttentionControlEdit):
         super(AttentionRefine, self).__init__(
             prompts, num_steps, cross_replace_steps, self_replace_steps, latent_blend, tokenizer=tokenizer,
             additional_attention_store=additional_attention_store, use_inversion_attention = use_inversion_attention,
-            attention_blend=attention_blend,
+            attention_blend=attention_blend,temp_blend=temp_blend,
             save_self_attention = save_self_attention,
             disk_store = disk_store,
             attention_path=attention_path  # 传递参数
@@ -323,6 +372,7 @@ class AttentionReweight(AttentionControlEdit):
                 additional_attention_store=None,
                 use_inversion_attention = False,
                 attention_blend: SpatialBlender=None,
+                temp_blend: SpatialBlender = None,
                 save_self_attention:bool = True,
                 disk_store = False,
                 attention_path: str=None  
@@ -331,7 +381,7 @@ class AttentionReweight(AttentionControlEdit):
             prompts, num_steps, cross_replace_steps, self_replace_steps, latent_blend, tokenizer=tokenizer,
             additional_attention_store=additional_attention_store,
             use_inversion_attention = use_inversion_attention,
-            attention_blend=attention_blend,
+            attention_blend=attention_blend,temp_blend=temp_blend,
             save_self_attention=save_self_attention,
             disk_store = disk_store,
             attention_path=attention_path
@@ -357,10 +407,12 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
                     blend_words=None, equilizer_params=None, 
                     additional_attention_store=None, use_inversion_attention = False, 
                     blend_self_th: float=(0.3, 0.3),
+                    blend_temp_th: float=(0.3, 0.3),
                     blend_latents_th: float=(0.3, 0.3),
                     NUM_DDIM_STEPS=None,
                     blend_latents = False,
                     blend_self_attention=False,
+                    blend_temp_attention=False,
                     save_path = None,
                     save_self_attention = True,
                     disk_store = False,
@@ -395,6 +447,16 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
         else:
             attention_blend = None
         
+        if blend_temp_attention:
+            temp_blend = SpatialBlender( prompts, blend_words,
+                                                    start_blend = 0.0, end_blend=2,
+                                                  tokenizer=tokenizer, th=blend_temp_th, NUM_DDIM_STEPS=NUM_DDIM_STEPS,
+                           save_path=save_path+f'/temp_blend_mask',
+                           prompt_choose='source')
+            print(f'Blend temp attention mask with threshold {blend_temp_th}')
+        else:
+            temp_blend = None
+
 
     if is_replace_controller:
         print('use replace controller')
@@ -403,7 +465,7 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
                                       latent_blend=latent_blend, tokenizer=tokenizer,
                                       additional_attention_store=additional_attention_store,
                                       use_inversion_attention = use_inversion_attention,
-                                      attention_blend=attention_blend,
+                                      attention_blend=attention_blend,temp_blend=temp_blend,
                                       save_self_attention = save_self_attention,
                                       disk_store=disk_store,
                                       attention_path=attention_path
@@ -415,7 +477,7 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
                                      latent_blend=latent_blend, tokenizer=tokenizer,
                                      additional_attention_store=additional_attention_store,
                                      use_inversion_attention = use_inversion_attention,
-                                     attention_blend=attention_blend,
+                                     attention_blend=attention_blend,temp_blend=temp_blend,
                                      save_self_attention = save_self_attention,
                                      disk_store=disk_store,
                                      attention_path=attention_path
@@ -428,7 +490,7 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
                                         tokenizer=tokenizer,
                                         additional_attention_store=additional_attention_store,
                                         use_inversion_attention = use_inversion_attention,
-                                        attention_blend=attention_blend,
+                                        attention_blend=attention_blend,temp_blend=temp_blend,
                                         save_self_attention = save_self_attention,
                                         disk_store=disk_store,
                                         attention_path=attention_path

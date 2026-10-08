@@ -762,6 +762,8 @@ class RAVE(nn.Module):
             # 处理图像批次并编码图像
             img_batch, control_batch = self.process_image_batch(input_dict['image_pil_list'])
             init_latents_pre = self.encode_imgs(img_batch)
+            # 深度图构建完成，释放 annotator 显存给后续 ControlNet 生成
+            pu.unload_preprocess_models()
             
             # 创建调度器并设置时间步长
             self.scheduler = DDIMScheduler.from_config(self.scheduler_config)

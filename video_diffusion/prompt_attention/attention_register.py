@@ -174,13 +174,61 @@ def register_attention_control(model, controller):
             # dropout
             # hidden_states = self.to_out[1](hidden_states)
             return hidden_states
-        
-      
-        
+
+        def Temp_attn_forward(hidden_states, encoder_hidden_states=None, attention_mask=None,grid_sizeH=2,grid_sizeW=2):
+
+            is_cross = 3
+
+            encoder_hidden_states = encoder_hidden_states
+
+            if self.group_norm is not None:
+                hidden_states = self.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
+
+            query = self.to_q(hidden_states)
+            query = self.reshape_heads_to_batch_dim(query)
+
+            if self.added_kv_proj_dim is not None:
+                key = self.to_k(hidden_states)
+                value = self.to_v(hidden_states)
+
+                encoder_hidden_states_key_proj = self.add_k_proj(encoder_hidden_states)
+                encoder_hidden_states_value_proj = self.add_v_proj(encoder_hidden_states)
+
+                key = self.reshape_heads_to_batch_dim(key)
+                value = self.reshape_heads_to_batch_dim(value)
+                encoder_hidden_states_key_proj = self.reshape_heads_to_batch_dim(encoder_hidden_states_key_proj)
+                encoder_hidden_states_value_proj = self.reshape_heads_to_batch_dim(encoder_hidden_states_value_proj)
+
+                key = torch.concat([encoder_hidden_states_key_proj, key], dim=1)
+                value = torch.concat([encoder_hidden_states_value_proj, value], dim=1)
+            else:
+                encoder_hidden_states = encoder_hidden_states if encoder_hidden_states is not None else hidden_states
+                key = self.to_k(encoder_hidden_states)
+                value = self.to_v(encoder_hidden_states)
+
+                key = self.reshape_heads_to_batch_dim(key)
+                value = self.reshape_heads_to_batch_dim(value)
+
+            if attention_mask is not None:
+                if attention_mask.shape[-1] != query.shape[1]:
+                    target_length = query.shape[1]
+                    attention_mask = F.pad(attention_mask, (0, target_length), value=0.0)
+                    attention_mask = attention_mask.repeat_interleave(self.heads, dim=0)
+
+            if self._use_memory_efficient_attention_xformers and query.shape[-2] > 32 ** 2:
+                hidden_states = self._memory_efficient_attention_xformers(query, key, value, attention_mask)
+                hidden_states = hidden_states.to(query.dtype)
+            else:
+                hidden_states = _attention(query, key, value, is_cross, attention_mask=attention_mask,grid_sizeH=grid_sizeH,grid_sizeW=grid_sizeW)
+            hidden_states = to_out(hidden_states)
+            return hidden_states
+
         if attention_type == 'CrossAttention':
             return forward
         if attention_type == "SparseCausalAttention":
             return spatial_temp_forward
+        if attention_type == "Temp_attn":
+            return Temp_attn_forward
  
 
     class DummyController:
@@ -203,7 +251,11 @@ def register_attention_control(model, controller):
             #  print(net_[0],net_[1].__class__.__name__ )
              net_[1].forward = attention_controlled_forward(net_[1], place_in_unet, attention_type = net_[1].__class__.__name__)
              return count + 1
-        
+        if net_[1].__class__.__name__ == 'CrossAttention' and net_[0] =='attn_temp' :
+             # temporal attention 也走 controller：inversion 保存、编辑期重放（FateZero 时序保持机制）
+             net_[1].forward = attention_controlled_forward(net_[1], place_in_unet, attention_type ="Temp_attn" )
+             return count + 1
+
         elif hasattr(net_[1], 'children'):
             for net in net_[1].named_children():
                 #if net[0] !='attn_temp':

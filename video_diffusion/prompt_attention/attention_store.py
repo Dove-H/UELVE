@@ -66,16 +66,23 @@ class AttentionStore(AttentionControl):
     def step_callback(self, x_t,flag,attention_path):
         self.flag=flag
         self.attention_path=attention_path
+        if flag==0 and getattr(self, 'latents_path', None):
+            # 与旧版 latents_store 语义对齐：保存"本步更新后"的 latent（org 帧布局），
+            # 此处 cur_step 尚未自增，等于刚完成的反演步索引；
+            # 编辑端 blend 读 {N-1-i}.pt，等价于旧版 latents_store[N-1-i]
+            os.makedirs(self.latents_path, exist_ok=True)
+            torch.save(x_t, os.path.join(self.latents_path, f'{self.cur_step}.pt'))
         x_t = super().step_callback(x_t)
-        
+
         # if flag==0:
         #    self.latents_store.append(x_t.cpu().detach())
         return x_t
-    
+
     @staticmethod
     def get_empty_store():
         return {"down_cross": [], "mid_cross": [], "up_cross": [],
-                "down_self": [],  "mid_self": [],  "up_self": [],}
+                "down_self": [],  "mid_self": [],  "up_self": [],
+                "down_temp": [],  "mid_temp": [],  "up_temp": [],}
 
     @staticmethod
     def get_empty_cross_store():
@@ -83,10 +90,10 @@ class AttentionStore(AttentionControl):
                 }
 
     def forward(self, attn, is_cross: int, place_in_unet: str,grid_sizeH=2,grid_sizeW=2):
-        key = f"{place_in_unet}_{'self' if is_cross == 1 else 'cross' }"
-        if attn.shape[-2] <= 32 ** 2: 
+        key = f"{place_in_unet}_{'self' if is_cross == 1 else 'cross' if is_cross == 2 else 'temp'}"
+        if attn.shape[-2] <= 32 ** 2:
             if self.stage==0:
-                if is_cross==2 or self.save_self_attention:
+                if is_cross==2 or is_cross==3 or self.save_self_attention:
                     if attn.shape[-2] == 32**2:
                         append_tensor = attn.cpu().detach()
                     else:
@@ -105,14 +112,16 @@ class AttentionStore(AttentionControl):
     def between_steps(self):
         if len(self.attention_store) == 0:
                 self.attention_store = self.step_store
-        if self.flag==1: 
+        elif self.flag==1:
+            # 首次调用时 attention_store 与 step_store 是同一对象（上方别名赋值），
+            # 必须跳过累加，否则第 0 步注意力被翻倍（旧版由 else: 分支保证）
             for key in self.attention_store:
-            
+
                 for i in range(len(self.attention_store[key])):
-                
+
                     self.attention_store[key][i] += self.step_store[key][i]
-        elif self.flag==0:
-            # Save to disk instead of memory
+        if self.flag==0:
+            # Save to disk instead of memory（首步也要存，故独立于上面的 len 判断）
             os.makedirs(self.attention_path, exist_ok=True)
             time_start=time.time()
             torch.save({

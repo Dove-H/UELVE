@@ -391,8 +391,12 @@ class SpatiotempTransformerBlock(nn.Module):
             if self.use_ada_layer_norm
             else self.norm_temp(hidden_states)
         )
-
-        hidden_states = self.attn_temp(norm_hidden_states) + hidden_states
+        if indices == []:
+            hidden_states = self.attn_temp(norm_hidden_states) + hidden_states
+        else:
+            # 网格模式下传入 grid_sizeH/W：attn_temp 被 controller 补丁接管时（Temp_attn_forward）
+            # 需要这两个参数；未被补丁时原生 forward 忽略多余 kwargs 之外的同名默认参数亦兼容
+            hidden_states = self.attn_temp(norm_hidden_states,grid_sizeH=grid_sizeH,grid_sizeW=grid_sizeW) + hidden_states
         hidden_states = rearrange(hidden_states, "(b d) f c -> (b f) d c", d=d)
         return hidden_states
 
