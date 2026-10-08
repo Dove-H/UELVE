@@ -416,9 +416,7 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
                     save_path = None,
                     save_self_attention = True,
                     disk_store = False,
-                    attention_path: str=None,  # 新增参数
-                    fixed_mask=None,  # 外接掩码（GroundingDINO+FastSAM），仅作用于 latent_blend
-                    fuse_target_attention=False  # Option C: 外接mask与cross-attention mask取并集
+                    attention_path: str=None  # 新增参数
                     ) -> AttentionControlEdit:
     if (blend_words is None) or (blend_words == 'None'):
         latent_blend = None
@@ -429,9 +427,7 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
                                        start_blend = 0.2, end_blend=0.8,
                                        tokenizer=tokenizer, th=blend_latents_th, NUM_DDIM_STEPS=NUM_DDIM_STEPS,
                             save_path=save_path+f'/latent_blend_mask',
-                            prompt_choose='both',
-                            fixed_mask=fixed_mask,
-                            fuse_target_attention=fuse_target_attention)
+                            prompt_choose='both')
             print(f'Blend latent mask with threshold {blend_latents_th}')
         else:
             latent_blend = None
@@ -440,9 +436,7 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
                                                     start_blend = 0.0, end_blend=2,
                                                   tokenizer=tokenizer, th=blend_self_th, NUM_DDIM_STEPS=NUM_DDIM_STEPS,
                            save_path=save_path+f'/attention_blend_mask',
-                           prompt_choose='source',
-                           fixed_mask=fixed_mask,
-                           fuse_target_attention=fuse_target_attention)
+                           prompt_choose='source')
             print(f'Blend self attention mask with threshold {blend_self_th}')
         else:
             attention_blend = None

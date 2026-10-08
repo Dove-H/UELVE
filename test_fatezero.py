@@ -40,7 +40,6 @@ import numpy as np
 import utils.preprocesser_utils as pu
 import utils.image_process_utils as ipu
 import utils.feature_utils as fu
-from mask_utils import gen_masks
 
 
 # diffusers 路径管理函数
@@ -540,26 +539,6 @@ def test(
         controlnet_conditioning_scale=controlnet_conditioning_scale
     )
    
-    # ---- External mask (GroundingDINO + FastSAM) for latent blending ----
-    use_external_mask = editing_config.get('use_external_mask', False)
-    mask_source_word = editing_config.get('mask_source_word', None)
-    mask_model_path = editing_config.get('mask_model_path', gen_masks.DEFAULT_MASK_MODEL_PATH)
-    mask_box_threshold = editing_config.get('mask_box_threshold', 0.30)
-    mask_dilate_px = editing_config.get('mask_dilate_px', 4)
-    # Option C: 外接源物体mask(FastSAM)与cross-attention目标物体mask取并集。仅当 use_external_mask=True 时有意义。
-    #   False(默认): 外接mask 直接替换 cross-attention mask(bypass)。
-    #   True: 外接mask ∪ cross-attention mask,用于目标物体(如pizza)在源视频里不存在、无法分割的场景。
-    fuse_target_attention = editing_config.get('fuse_target_attention', False)
-    pipeline.fuse_target_attention = fuse_target_attention
-    mask_models = None
-    if method == "FateZero" and use_external_mask:
-        if not mask_source_word:
-            print("[mask] use_external_mask=True but mask_source_word is empty; falling back to cross-attention mask")
-            use_external_mask = False
-        else:
-            print(f"[mask] loading GroundingDINO+FastSAM for source word '{mask_source_word}' on rank {accelerator.process_index}")
-            mask_models = gen_masks.load_mask_models(str(accelerator.device), mask_model_path)
-
     for step, batch in enumerate(train_dataloader):
         assert batch["images"].shape[0] == 1, "Only support, overfiting on a single video"
         print("frames_per_GPU:", batch['images'].shape[2])
@@ -621,39 +600,6 @@ def test(
         images = batch["images"].to(dtype=weight_dtype)
         images = rearrange(images, "b c f h w -> (b f) c h w")
 
-        # ---- generate per-rank external mask from this batch's frames; attach to pipeline ----
-        if use_external_mask and mask_models is not None:
-            _imgs = batch["images"][0]  # [3, fpf, 512, 512] in [-1,1]
-            _frames_np = ((_imgs / 2 + 0.5).clamp(0, 1).permute(1, 2, 3, 0) * 255).byte().cpu().numpy()  # [fpf,512,512,3] uint8
-            _gd_proc, _gd_model, _fsam = mask_models
-            _mask512 = gen_masks.generate_word_mask(
-                _frames_np, mask_source_word, _gd_proc, _gd_model, _fsam, str(accelerator.device),
-                box_threshold=mask_box_threshold, dilate_px=mask_dilate_px,
-                verbose=accelerator.is_main_process)
-            pipeline.fixed_mask = torch.from_numpy(_mask512.astype(np.float32)).to(accelerator.device)
-            print(f"[mask] rank={accelerator.process_index} fixed_mask shape={tuple(pipeline.fixed_mask.shape)} "
-                  f"fill={pipeline.fixed_mask.mean().item():.3f}")
-            # ---- save the mask used for this edit (raw npz + per-frame overlay PNGs + contact sheet) ----
-            try:
-                _mask_dir = os.path.join(logdir, "mask")
-                os.makedirs(_mask_dir, exist_ok=True)
-                _r = accelerator.process_index
-                np.savez_compressed(os.path.join(_mask_dir, f"{mask_source_word}_rank{_r}.npz"),
-                                    **{mask_source_word: _mask512})
-                _sheet = Image.new("RGB", (512 * _mask512.shape[0], 512), (255, 255, 255))
-                _tint = np.array([255, 0, 0], np.uint8)
-                for _fi in range(_mask512.shape[0]):
-                    _arr = _frames_np[_fi].copy()
-                    _arr[_mask512[_fi]] = (0.5 * _arr[_mask512[_fi]] + 0.5 * _tint).astype(np.uint8)
-                    Image.fromarray(_arr).save(os.path.join(_mask_dir, f"{mask_source_word}_rank{_r}_frame{_fi}.png"))
-                    _sheet.paste(Image.fromarray(_arr), (_fi * 512, 0))
-                _sheet.save(os.path.join(_mask_dir, f"{mask_source_word}_rank{_r}_sheet.png"))
-                print(f"[mask] saved mask artifacts (npz + per-frame PNGs + sheet) -> {_mask_dir}")
-            except Exception as _e:
-                print(f"[mask] save mask failed: {_e}")
-        else:
-            pipeline.fixed_mask = None
-
         if accelerator is not None:
             _t_den0 = time.time()
             validation_sample_logger.log_sample_images(
@@ -666,10 +612,6 @@ def test(
                 control_image=depth_images,  # 传入控制图像
             )
             print(f"[TIMING] rank={accelerator.process_index} use_time_Denoising={time.time()-_t_den0:.4f}", flush=True)
-
-    if mask_models is not None:
-        del mask_models
-        torch.cuda.empty_cache()
 
     if torch.cuda.device_count() > 1:
         dist.barrier()
