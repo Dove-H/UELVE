@@ -92,6 +92,15 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
         image = rearrange(image, "(b f) c h w -> b c f h w", b=1)  # [1,3,8,512,512]
+        # ---- 帧补齐：与 FateZero pipeline 一致——复制末帧到 grid_sizeH*grid_sizeW 整数倍 ----
+        n_real = image.shape[2]
+        gA = self.grid_sizeH * self.grid_sizeW
+        n_pad = (-n_real) % gA
+        if n_pad:
+            print(f'[ControlNet] 帧数 {n_real} 非 {gA} 整数倍，复制末帧补齐到 {n_real + n_pad}')
+            image = torch.cat([image, image[:, :, -1:, :, :].expand(-1, -1, n_pad, -1, -1)], dim=2)
+        self._n_real = n_real
+        self.video_length = n_real + n_pad
         init_latents = grid.combine_frames_in_grid(image, self.grid_sizeH, self.grid_sizeW)
         init_latents = rearrange(init_latents, "b c f h w -> (b f) c h w")  # [2, 3, 1024, 1024]
         init_latents = self.encode_in_f_batches(init_latents, self.vae.encode)
@@ -99,8 +108,11 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         init_latents = torch.cat([init_latents], dim=0)
         init_latents_bcfhw = rearrange(init_latents, "(b f) c h w -> b c f h w", b=batch_size)
 
-        # control_image 需要匹配网格的数据格式
+        # control_image 需要匹配网格的数据格式（按自身帧数幂等补齐：原始帧/已补齐帧都能正确处理）
         control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=batch_size)
+        _n_pad_ctrl = (-control_image.shape[2]) % gA
+        if _n_pad_ctrl:
+            control_image = torch.cat([control_image, control_image[:, :, -1:, :, :].expand(-1, -1, _n_pad_ctrl, -1, -1)], dim=2)
         control_image = grid.combine_frames_in_grid(control_image, self.grid_sizeH, self.grid_sizeW)
 
         ddim_latent = self.ddim_clean2noisy_loop(
@@ -296,6 +308,12 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
 
         control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=2)
+        # 帧补齐：编辑阶段的 control_image 同样补到网格整数倍（已补齐则 n_pad 为 0，不会重复补）
+        _n_pad_c = (-control_image.shape[2]) % (self.grid_sizeH * self.grid_sizeW)
+        if _n_pad_c:
+            print(f'[ControlNet] 编辑阶段 control_image 帧数 {control_image.shape[2]} 补齐到 '
+                  f'{control_image.shape[2] + _n_pad_c}')
+            control_image = torch.cat([control_image, control_image[:, :, -1:, :, :].expand(-1, -1, _n_pad_c, -1, -1)], dim=2)
         control_image = grid.combine_frames_in_grid(control_image, self.grid_sizeH, self.grid_sizeW)
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -355,6 +373,9 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
 
         latents = self.decode_in_f_batches(latents)
         image = grid.restore_frames_from_grid(latents, self.grid_sizeH, self.grid_sizeW)
+        # 裁掉补齐帧（与 FateZero 一致），输出只保留真实帧
+        if getattr(self, '_n_real', None) is not None and image.shape[2] > self._n_real:
+            image = image[:, :, :self._n_real, :, :]
         image = rearrange(image, "b c f h w -> b f h w c")
 
         has_nsfw_concept = None

@@ -610,6 +610,14 @@ def test(
         if method == "ControlNet":
             # ControlNet: 生成深度图作为控制条件
             images=batch["images"]
+            # 帧补齐：深度图生成走网格批处理，需先补到网格整数倍；生成完裁回真实帧。
+            # 补齐的权威来源在 pipeline 内部（按同样规则再补），此处裁回即不会重复补
+            n_real_d = images.shape[2]
+            n_pad_d = (-n_real_d) % (grid_sizeH * grid_sizeW)
+            if n_pad_d:
+                print(f'[ControlNet] 深度图生成：帧数 {n_real_d} 非 {grid_sizeH*grid_sizeW} 整数倍，'
+                      f'复制末帧补齐到 {n_real_d + n_pad_d}')
+                images = torch.cat([images, images[:, :, -1:, :, :].expand(-1, -1, n_pad_d, -1, -1)], dim=2)
             images=grid.combine_frames_in_grid(images,grid_sizeH,grid_sizeW)
             images_for_depth = rearrange(images.to(dtype=weight_dtype), "b c f h w -> (b f) c h w")
             time1=time.time()
@@ -620,6 +628,8 @@ def test(
             print("control_image time cost=",time2-time1)
             depth_images=rearrange(depth_images,"(b f) c h w -> b c f h w", b=1)
             depth_images=grid.restore_frames_from_grid(depth_images,grid_sizeH,grid_sizeW)
+            if n_pad_d:
+                depth_images = depth_images[:, :, :n_real_d, :, :]  # 裁掉补齐帧，恢复真实帧数
             depth_images=rearrange(depth_images,"b c f h w -> (b f) c h w")
             depth_images = depth_images.to(device=accelerator.device, dtype=weight_dtype)
         elif method == "FateZero":

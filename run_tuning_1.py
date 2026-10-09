@@ -227,13 +227,15 @@ def main(
 
     def alternate(latents,flag):
         #print("latents.shape=",latents.shape)
-        org = list(range(n_sample_frames))
-        #print("n_sample_frame=",n_sample_frames)
+        # 与推理一致：按补齐后的总帧数置换（latents 为网格合并后 b c F h w，F*网格面积=补齐后帧数）
+        n_frames = latents.shape[2] * grid_sizeH * grid_sizeW
+        org = list(range(n_frames))
+        #print("n_sample_frame=",n_frames)
         alt = org[grid_sizeH:] + org[:grid_sizeH]
         #alt = [0,1,4,5,2,3,6,7]
-        if n_sample_frames==grid_sizeH*grid_sizeW:
+        if n_frames==grid_sizeH*grid_sizeW:
             sqc=org
-        elif flag%2==0 and n_sample_frames!=grid_sizeH*grid_sizeW:
+        elif flag%2==0 and n_frames!=grid_sizeH*grid_sizeW:
             sqc=alt
         else:
             sqc=torch.argsort(torch.tensor(alt))
@@ -303,6 +305,14 @@ def main(
               
                 pixel_values = batch["pixel_values"]
                 pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
+                # 帧补齐：与推理（p2p_ddim_fatezero.prepare_latents_ddim_inverted）完全一致——
+                # 复制末帧到 grid_sizeH*grid_sizeW 的整数倍，保证微调学到的帧编排与推理相同
+                n_real = pixel_values.shape[2]
+                gA = grid_sizeH * grid_sizeW
+                n_pad = (-n_real) % gA
+                if n_pad:
+                    print(f'[tune] 帧数 {n_real} 非 {gA} 整数倍，复制末帧补齐到 {n_real + n_pad}')
+                    pixel_values = torch.cat([pixel_values, pixel_values[:, :, -1:, :, :].expand(-1, -1, n_pad, -1, -1)], dim=2)
                 pixel_values = grid.combine_frames_in_grid(pixel_values, grid_sizeH,grid_sizeW)
                 pixel_values = rearrange(pixel_values, "b c f h w -> b f c h w")
                 video_length = pixel_values.shape[1]
