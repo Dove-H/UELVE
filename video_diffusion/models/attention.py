@@ -4,8 +4,6 @@ from typing import Optional
 
 import torch
 import grid
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 from torch import nn
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
@@ -303,9 +301,6 @@ class SpatiotempTransformerBlock(nn.Module):
             hidden_states=norm_hidden_states,
             attention_mask=attention_mask,
         )
-        if indices !=[]:
-            kwargs.update(grid_sizeH=grid_sizeH)
-            kwargs.update(grid_sizeW=grid_sizeW)
         if self.only_cross_attention:
             kwargs.update(encoder_hidden_states=encoder_hidden_states)
         if self.use_sparse_causal_attention:
@@ -333,32 +328,19 @@ class SpatiotempTransformerBlock(nn.Module):
             hidden_states = self.apply_temp_attention(hidden_states, timestep, clip_length,grid_sizeH=grid_sizeH,grid_sizeW=grid_sizeW,indices=indices)
 
         if self.attn2 is not None:
-            # 2. Cross-Attention
+            # 2. Cross-Attention（逐帧；controller 由 fatezero_register 以实例补丁接入）
             norm_hidden_states = (
                 self.norm2(hidden_states, timestep)
                 if self.use_ada_layer_norm
                 else self.norm2(hidden_states)
             )
-            if indices ==[]:
-                #原装的corss_attention
-                hidden_states = (
-                    self.attn2(
-                        norm_hidden_states, # [16, 4096, 320]
-                        encoder_hidden_states=encoder_hidden_states, # [1, 77, 768]
-                        attention_mask=attention_mask,
-                    )+ hidden_states
-                )
-            else:
-                hidden_states = (
-                    #register的cross_attention
-                    self.attn2(
-                        norm_hidden_states, # [16, 4096, 320]
-                        encoder_hidden_states=encoder_hidden_states, # [1, 77, 768]
-                        attention_mask=attention_mask,
-                        grid_sizeH=grid_sizeH,
-                        grid_sizeW=grid_sizeW
-                    )+ hidden_states
-                )
+            hidden_states = (
+                self.attn2(
+                    norm_hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    attention_mask=attention_mask,
+                ) + hidden_states
+            )
         if clip_length is not None and self.temp_attention_position == "after_cross":
             hidden_states = self.apply_temp_attention(hidden_states, timestep, clip_length,grid_sizeH=grid_sizeH,grid_sizeW=grid_sizeW,indices=indices)
 
@@ -384,6 +366,11 @@ class SpatiotempTransformerBlock(nn.Module):
         return hidden_states
 
     def apply_temp_attention(self, hidden_states, timestep, clip_length,grid_sizeH=2,grid_sizeW=2,indices=[]):
+        # temporal attention 按帧处理（网格数据的"时间维"与帧序列不同，先拆回帧）。
+        # 零初始化（to_out 全零）时 attn_temp 为恒等映射，直接跳过省计算；
+        # one-shot tune 载入非零权重后自动恢复真实前向（此路径不做任何重放）。
+        if not self.attn_temp.to_out[0].weight.data.any():
+            return hidden_states
         d = hidden_states.shape[1]
         hidden_states = rearrange(hidden_states, "(b f) d c -> (b d) f c", f=clip_length*grid_sizeH*grid_sizeW)
         norm_hidden_states = (
@@ -391,12 +378,7 @@ class SpatiotempTransformerBlock(nn.Module):
             if self.use_ada_layer_norm
             else self.norm_temp(hidden_states)
         )
-        if indices == []:
-            hidden_states = self.attn_temp(norm_hidden_states) + hidden_states
-        else:
-            # 网格模式下传入 grid_sizeH/W：attn_temp 被 controller 补丁接管时（Temp_attn_forward）
-            # 需要这两个参数；未被补丁时原生 forward 忽略多余 kwargs 之外的同名默认参数亦兼容
-            hidden_states = self.attn_temp(norm_hidden_states,grid_sizeH=grid_sizeH,grid_sizeW=grid_sizeW) + hidden_states
+        hidden_states = self.attn_temp(norm_hidden_states) + hidden_states
         hidden_states = rearrange(hidden_states, "(b d) f c -> (b f) d c", d=d)
         return hidden_states
 

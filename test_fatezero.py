@@ -542,6 +542,9 @@ def test(
     for step, batch in enumerate(train_dataloader):
         assert batch["images"].shape[0] == 1, "Only support, overfiting on a single video"
         print("frames_per_GPU:", batch['images'].shape[2])
+        if batch['images'].shape[2] * torch.cuda.device_count() != video_length:
+            print(f"[WARN] n_sample_frame={video_length} 不能被 GPU 数整除，"
+                  f"数据集按 floor 切分已丢弃尾部帧（当前保留 {batch['images'].shape[2] * torch.cuda.device_count()} 帧）")
         
         vae.eval()
         text_encoder.eval()
@@ -576,21 +579,39 @@ def test(
         
         use_inversion_attention = editing_config.get('use_inversion_attention', False)
         controlnet_conditioning_scale = 1.0
-        
+
         _t_inv0 = time.time()
-        batch['ddim_init_latents'] = pipeline.prepare_latents_ddim_inverted(
-            rearrange(batch["images"].to(dtype=weight_dtype), "b c f h w -> (b f) c h w"),
-            batch_size=1,
-            num_images_per_prompt=1,
-            text_embeddings=text_embeddings,
-            prompt=dataset_config.prompt,
-            store_attention=use_inversion_attention,
-            LOW_RESOURCE=True,
-            save_path=logdir if verbose else None,
-            controlnet_conditioning_scale=controlnet_conditioning_scale,
-            control_image=depth_images,  # 传入深度图作为控制条件
-            scheduler_config=scheduler_config
-        )
+        if method == "FateZero":
+            # FateZero（重构版 pipeline）：按编辑消费镜像裁剪存储，支持缓存复用
+            p2p_cfg = editing_config['p2p_config'][0]
+            editing_params = dict(
+                source_prompt=dataset_config.prompt,
+                prompt=editing_config['editing_prompts'][0],
+                cross_replace_steps=p2p_cfg.get('cross_replace_steps'),
+                self_replace_steps=p2p_cfg.get('self_replace_steps', 0.0),
+                blend_latents=p2p_cfg.get('blend_latents', False),
+            )
+            batch['ddim_init_latents'] = pipeline.prepare_latents_ddim_inverted(
+                rearrange(batch["images"].to(dtype=weight_dtype), "b c f h w -> (b f) c h w"),
+                text_embeddings=text_embeddings,
+                scheduler_config=scheduler_config,
+                editing_params=editing_params,
+                num_inference_steps=editing_config['num_inference_steps'],
+            )
+        else:
+            # ControlNet：保持原调用方式
+            batch['ddim_init_latents'] = pipeline.prepare_latents_ddim_inverted(
+                rearrange(batch["images"].to(dtype=weight_dtype), "b c f h w -> (b f) c h w"),
+                batch_size=1,
+                num_images_per_prompt=1,
+                text_embeddings=text_embeddings,
+                prompt=dataset_config.prompt,
+                LOW_RESOURCE=True,
+                save_path=logdir if verbose else None,
+                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                control_image=depth_images,  # 传入深度图作为控制条件
+                scheduler_config=scheduler_config
+            )
         print(f"[TIMING] rank={accelerator.process_index} use_time_Inversion={time.time()-_t_inv0:.4f}", flush=True)
         
         vae.eval()
