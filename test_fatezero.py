@@ -75,6 +75,12 @@ def clear_diffusers_cache():
     for module_name in modules_to_remove:
         del sys.modules[module_name]
 
+    # diffusers 被驱逐后会整体重新初始化，新的日志模块会往持久存在的 'diffusers'
+    # logger 上再挂一个 StreamHandler（logging 的 logger 不随 sys.modules 清除），
+    # 不摘掉旧 handler 的话所有 diffusers 警告都会在终端打印两遍。
+    import logging
+    logging.getLogger('diffusers').handlers.clear()
+
 @contextmanager
 def diffusers_context(method):
     """diffusers 版本切换的上下文管理器"""
@@ -138,6 +144,29 @@ def _wait_for_file(path, timeout_s, what, fresh_after=None):
         if time.time() - t0 > timeout_s:
             raise TimeoutError(f"等待 {what} 超时: {path}")
         time.sleep(5)
+
+
+def _find_tune_yaml(dataset_path):
+    """按数据集路径在 config/tune/ 下自动匹配 tune 配置（train_data.video_path 一致即命中）。
+
+    免去编辑配置里手填 tune-yaml；匹配不到时给出明确指引。
+    """
+    from glob import glob as _glob
+    want = os.path.normpath(os.path.join(PROJECT_ROOT, str(dataset_path)))
+    for cand in sorted(_glob(os.path.join(PROJECT_ROOT, "config", "tune", "*.yaml"))):
+        try:
+            tp = OmegaConf.load(cand)["train_data"]["video_path"]
+        except Exception:
+            continue
+        have = os.path.normpath(os.path.join(PROJECT_ROOT, str(tp)))
+        if have == want:
+            rel = os.path.relpath(cand, PROJECT_ROOT)
+            print(f"[tune] 未配置 tune-yaml，按数据集 {dataset_path} 自动匹配: {rel}")
+            return rel
+    raise SystemExit(
+        f"[ELVE] temporal 路由需要 tune 配置，但 config/tune/ 下没有 train_data.video_path "
+        f"匹配 {dataset_path} 的 yaml。请在编辑配置里显式加一行 tune-yaml: <path>，"
+        f"或参照 config/tune/ 现有配置新建（train_data.video_path 需指向同一数据集）。")
 
 
 def run_tune(tune_config_path):
@@ -209,15 +238,12 @@ def llm_decision_routing(Omegadict, config):
         target_prompt = list(Omegadict["editing_config"]["editing_prompts"])
         adaption, info = deepseek.LLM_stream(source_prompt, target_prompt)
         paradigm = classify_adaption(adaption)
-        print(f"[LLM] model_adaption = {adaption!r} -> 路由: {paradigm} "
-              f"(较全量输出提前 {info['t_total_ms'] - info['t_adaption_ms']:.0f} ms 拿到决策)")
         with open(_decision_path(config), "w") as f:  # 多 GPU 时同步给其余进程
             json.dump({"adaption": adaption, "paradigm": paradigm}, f)
     else:
         decision = _wait_for_file(_decision_path(config), timeout_s=600,
                                   what="rank0 的 LLM 决策", fresh_after=time.time() - 2)
         paradigm = json.loads(decision)["paradigm"]
-        print(f"[LLM] 其余进程读取 rank0 决策 -> 路由: {paradigm}")
 
     if paradigm == "motion":
         # 阶段3：MotionEditor 为外置模块，启动后即返回，不进入 ELVE pipeline
@@ -229,7 +255,10 @@ def llm_decision_routing(Omegadict, config):
     if paradigm == "temporal":
         # 阶段2：先自主跑 tune，再加载 tune 后的模型文件（本阶段固定走 FateZero 模式）
         overrides["method"] = "FateZero"
-        tune_yaml = Omegadict.get("tune-yaml", os.path.join("config", "tune", "child-tune.yaml"))
+        # tune 配置：显式 tune-yaml 优先；缺省按数据集路径在 config/tune/ 自动匹配
+        tune_yaml = Omegadict.get("tune-yaml", None)
+        if tune_yaml is None:
+            tune_yaml = _find_tune_yaml(Omegadict["dataset_config"]["path"])
         if _is_main_process():
             tuned_dir = run_tune(tune_yaml)
         else:
@@ -482,6 +511,15 @@ def test(
     args = get_function_args()
     grid_sizeH = editing_config["grid_sizeH"]
     grid_sizeW = editing_config["grid_sizeW"]
+    # method 与 pipeline target 一致性自动校正：method 是唯一开关，target 配错时自动切到
+    # 对应 pipeline（两个构造器均 **kwargs 兼容，参数残留无害；DeepSeek 路由覆盖 method 后同样生效）
+    _target = test_pipeline_config.get("target", "") if test_pipeline_config else ""
+    if method == "FateZero" and "spatial_temp" in _target:
+        test_pipeline_config["target"] = "video_diffusion.pipelines.p2p_ddim_fatezero.P2pDDIMFateZeroPipeline"
+        print("[ELVE] method=FateZero：target 已自动从 ControlNet pipeline 切换为 P2pDDIMFateZeroPipeline")
+    elif method == "ControlNet" and "fatezero" in _target:
+        test_pipeline_config["target"] = "video_diffusion.pipelines.p2p_ddim_spatial_temp.P2pDDIMSpatiotempPipeline"
+        print("[ELVE] method=ControlNet：target 已自动从 FateZero pipeline 切换为 P2pDDIMSpatiotempPipeline")
     controlnet_conditioning_scale = 1.0
     video_length = dataset_config["n_sample_frame"]
     time_string = get_time_string()
@@ -497,10 +535,15 @@ def test(
                 f"  多卡运行: CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 "
                 f"test_fatezero.py --config <yaml>")
         dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo')
-        Control_image_path = os.path.join('Control', str(GPU_num) + "GPU",control_class,str(dist.get_rank()), os.path.basename(dataset_config["path"]),str(video_length) )
-    else:
-        Control_image_path = os.path.join('Control',str(GPU_num) + "GPU",control_class,os.path.basename(dataset_config["path"]),str(video_length)  )
-    os.makedirs(Control_image_path, exist_ok = True)
+    # Control 深度图缓存目录只有 ControlNet 模式需要；FateZero 模式不再创建空目录
+    Control_image_path = None
+    if method == "ControlNet":
+        _parts = ['Control', f"{GPU_num}GPU", control_class]
+        if GPU_num > 1:
+            _parts.append(str(dist.get_rank()))
+        _parts += [os.path.basename(dataset_config["path"]), str(video_length)]
+        Control_image_path = os.path.join(*_parts)
+        os.makedirs(Control_image_path, exist_ok=True)
     if logdir is None:
         logdir = config.replace('config', 'result').replace('.yml', '').replace('.yaml', '')
     logdir += f"_{time_string}"

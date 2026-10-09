@@ -254,8 +254,7 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
 
         keep_on_gpu = self.video_length <= self.memory_frames
         print(f'[FateZero] 帧数(含补齐)={self.video_length} memory_frames={self.memory_frames} '
-              f'→ 特征{"驻留GPU" if keep_on_gpu else "落盘+异步预取"}；'
-              f'need: cross={sorted(need["cross"])} self={sorted(need["self"])} latents={sorted(need["latents"])}')
+              f'→ 特征{"驻留GPU" if keep_on_gpu else "落盘+异步预取"}')
 
         if (not self.All_Inversion) and InversionStore.cache_valid(self.store_dir, meta, need):
             print(f'[FateZero] 缓存命中，跳过反演: {self.store_dir}')
