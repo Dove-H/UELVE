@@ -2,8 +2,10 @@
 FateZero 模式（重构版）controller 注册。
 
 与原版 FateZero 的 register_attention_control 语义对齐：
-- attn1 (SparseCausalAttention) → is_cross=False（'{place}_self' 键）
-- attn2 (CrossAttention)         → is_cross=True（'{place}_cross' 键）
+- attn1 → is_cross=False（'{place}_self' 键，网格内全自注意力；
+  ELVE 已弃用 Tune-A-Video 式稀疏因果 gather，attn1 与 attn2 同为 CrossAttention
+  实例，故按模块名而非类名识别）
+- attn2 → is_cross=True（'{place}_cross' 键）
 - attn_temp 完全不注册（原版 register_recr 即跳过；其 to_out 零初始化在
   zero-shot 下为恒等映射，tune 后自由前向，两种模式都不需要重放）
 
@@ -57,7 +59,7 @@ def register_attention_control(model, controller):
 
         def forward(hidden_states, encoder_hidden_states=None, attention_mask=None,
                     clip_length: int = None, **_ignored):
-            # SparseCausalAttention_index 等额外 kwargs 在原 forward 中本就无效果（gather 已注释），忽略
+            # clip_length 等历史 kwargs 已无效果，忽略以防旧调用方传参
             if module.group_norm is not None:
                 hidden_states = module.group_norm(
                     hidden_states.transpose(1, 2)).transpose(1, 2)
@@ -91,11 +93,10 @@ def register_attention_control(model, controller):
 
     def register_recr(net_, count, place_in_unet):
         name, module = net_
-        cls = module.__class__.__name__
-        if name == 'attn1' and cls == 'SparseCausalAttention':
+        if name == 'attn1':
             module.forward = patch_forward(module, False, place_in_unet)
             return count + 1
-        if name == 'attn2' and cls == 'CrossAttention':
+        if name == 'attn2':
             module.forward = patch_forward(module, True, place_in_unet)
             return count + 1
         # attn_temp：不注册（原版语义）

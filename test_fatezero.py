@@ -8,6 +8,11 @@ from omegaconf import OmegaConf
 import click
 import json
 import subprocess
+# 裸 python 启动且未指定 GPU 时，默认只用物理 GPU0（须在 torch 导入前设置），
+# 避免多卡机器上误入 torch.distributed 路径；accelerate 多卡启动（有 RANK/LOCAL_RANK）不受影响
+if ('CUDA_VISIBLE_DEVICES' not in os.environ
+        and not {'RANK', 'LOCAL_RANK', 'WORLD_SIZE'} & set(os.environ)):
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import torch.distributed as dist
 import torch
 import torch.utils.data
@@ -482,6 +487,15 @@ def test(
     time_string = get_time_string()
     GPU_num=torch.cuda.device_count()
     if GPU_num>1:
+        # 多卡 distributed 路径只在 accelerate 启动（RANK/WORLD_SIZE 已注入）时才合法；
+        # 裸 python 在多卡机器上误入会在 init_process_group 因缺 RANK 崩溃，给出明确指引
+        if 'RANK' not in os.environ or 'WORLD_SIZE' not in os.environ:
+            raise SystemExit(
+                f"[ELVE] 检测到 {GPU_num} 张 GPU，但当前是裸 python 启动（无 RANK/WORLD_SIZE），"
+                f"无法走 torch.distributed 路径。\n"
+                f"  单卡运行: CUDA_VISIBLE_DEVICES=0 python test_fatezero.py --config <yaml>\n"
+                f"  多卡运行: CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 "
+                f"test_fatezero.py --config <yaml>")
         dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo')
         Control_image_path = os.path.join('Control', str(GPU_num) + "GPU",control_class,str(dist.get_rank()), os.path.basename(dataset_config["path"]),str(video_length) )
     else:
@@ -590,6 +604,7 @@ def test(
                 cross_replace_steps=p2p_cfg.get('cross_replace_steps'),
                 self_replace_steps=p2p_cfg.get('self_replace_steps', 0.0),
                 blend_latents=p2p_cfg.get('blend_latents', False),
+                latent_replace_steps=p2p_cfg.get('latent_replace_steps', (0.2, 0.8)),
             )
             batch['ddim_init_latents'] = pipeline.prepare_latents_ddim_inverted(
                 rearrange(batch["images"].to(dtype=weight_dtype), "b c f h w -> (b f) c h w"),

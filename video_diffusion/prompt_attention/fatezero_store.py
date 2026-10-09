@@ -191,6 +191,8 @@ class InversionStore(AttentionControl):
         except (FileNotFoundError, json.JSONDecodeError):
             return False
         for k, v in meta.items():
+            if isinstance(v, tuple):
+                v = list(v)  # json 序列化把 tuple 写成 list，统一口径再比较（如 latent_replace_steps）
             if manifest.get(k) != v:
                 return False
         for kind, new_set in need.items():

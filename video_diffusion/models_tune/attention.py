@@ -275,7 +275,7 @@ class BasicTransformerBlock(nn.Module):
 
     def forward(self, hidden_states, encoder_hidden_states=None, timestep=None, attention_mask=None, video_length=None,batch_bf=None,channel=None,height_g=None,weight_g=None,grid_sizeH=2,grid_sizeW=2,indices=[]):
         #print("indices",indices)
-        # SparseCausal-Attention
+        # Self-Attention（网格内全自注意力）
         #print("_______________latents.shape=",hidden_states.shape)
         norm_hidden_states = (
             self.norm1(hidden_states, timestep) if self.use_ada_layer_norm else self.norm1(hidden_states)

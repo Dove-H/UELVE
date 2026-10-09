@@ -134,8 +134,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             temp_downsample_i = ((i >= (len(down_block_types)-self.temp_downsample_time))
                                     and (not is_final_block))
             kwargs_copy.update({'temp_downsample': temp_downsample_i} )
-            
-            # kwargs_copy.update({'SparseCausalAttention_index': temp_downsample_i} )
+
             if temp_downsample_i:
                 print(f'Initialize model temp downsample at layer {i}')
             down_block = get_down_block(

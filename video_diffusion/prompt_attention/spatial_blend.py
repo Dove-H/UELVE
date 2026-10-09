@@ -114,7 +114,7 @@ class SpatialBlender:
         mask2 = self.get_mask(maps, masked_alpah_layers, True, 64, 64, step_in_store=step_in_store)
         #print("mask_shape_latent=",mask.shape)
         if self.substruct_layers is not None:
-            maps_sub = self.get_mask(maps, self.substruct_layers, False)
+            maps_sub = ~self.get_mask(maps, self.substruct_layers, False)
             mask = mask * maps_sub
         mask = mask.float()
         mask2 = mask2.float()

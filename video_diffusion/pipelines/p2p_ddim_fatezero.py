@@ -202,7 +202,8 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         """DDIM 反演：按 need 分片存储 attention / latent，返回最终噪声 latent。
 
         editing_params: 反演裁剪所需的最小编辑参数集
-        {source_prompt, prompt, cross_replace_steps, self_replace_steps, blend_latents}
+        {source_prompt, prompt, cross_replace_steps, self_replace_steps, blend_latents,
+         latent_replace_steps(可选, 默认 (0.2, 0.8))}
         """
         self.prepare_before_train_loop()
         self.scheduler_config = scheduler_config
@@ -231,14 +232,22 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
 
         # ---- 编辑消费镜像：需要存储的反演步集合 ----
         prompts = [editing_params['source_prompt'], editing_params['prompt']]
+        latent_replace_steps = editing_params.get('latent_replace_steps', (0.2, 0.8))
+        if isinstance(latent_replace_steps, (int, float)):
+            latent_replace_steps = (0.0, float(latent_replace_steps))
+        latent_replace_steps = (float(latent_replace_steps[0]), float(latent_replace_steps[1]))
         need = compute_need_steps(prompts, num_inference_steps,
                                   editing_params.get('cross_replace_steps'),
                                   editing_params.get('self_replace_steps', 0.0),
                                   editing_params.get('blend_latents', False),
-                                  self.tokenizer)
+                                  self.tokenizer,
+                                  latent_replace_steps=latent_replace_steps)
+        # meta 含 blend 窗口：改窗口即换缓存
         meta = dict(source_prompt=prompts[0], num_steps=num_inference_steps,
                     num_grids=num_grids, video_length=n_real,
-                    gridH=self.grid_sizeH, gridW=self.grid_sizeW)
+                    gridH=self.grid_sizeH, gridW=self.grid_sizeW,
+                    latent_replace_steps=latent_replace_steps)
+        self._latent_replace_steps = latent_replace_steps
         self._need = need
         self._num_grids = num_grids
         self._num_inv_steps = num_inference_steps
@@ -360,6 +369,14 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         equal_length = len(source_prompt.split()) == len(prompt.split())
         is_replace_controller = cfg.get('is_replace_controller', True) and equal_length
 
+        # 掩码阈值：blend_self_th / blend_latents_th 各自独立，旧配置的 blend_th 作为共用兼容别名
+        blend_th_legacy = cfg.get('blend_th', None)
+        blend_self_th = cfg.get('blend_self_th', blend_th_legacy if blend_th_legacy is not None else (0.3, 0.3))
+        blend_latents_th = cfg.get('blend_latents_th', blend_th_legacy if blend_th_legacy is not None else (0.3, 0.3))
+        # latent blend 窗口（与反演期 editing_params 同源；缺省回落到反演期归一化的值）
+        latent_replace_steps = cfg.get('latent_replace_steps',
+                                       getattr(self, '_latent_replace_steps', (0.2, 0.8)))
+
         provider = self._build_replay_provider(self._execution_device)
         edit_controller = make_controller(
             self.tokenizer, prompts,
@@ -371,8 +388,9 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
             equilizer_params=cfg.get('eq_params', None),
             replay_provider=provider,
             use_inversion_attention=cfg.get('use_inversion_attention', True),
-            blend_self_th=cfg.get('blend_self_th', (0.3, 0.3)),
-            blend_latents_th=cfg.get('blend_latents_th', (0.3, 0.3)),
+            blend_self_th=blend_self_th,
+            blend_latents_th=blend_latents_th,
+            latent_replace_steps=latent_replace_steps,
             blend_latents=cfg.get('blend_latents', False),
             blend_self_attention=cfg.get('blend_self_attention', False),
             save_path=save_path,

@@ -54,7 +54,6 @@ class SpatiotempTransformerModel(ModelMixin, ConfigMixin):
         use_linear_projection: bool = False,
         only_cross_attention: bool = False,
         upcast_attention: bool = False,
-        model_config: dict = {},
         **transformer_kwargs,
     ):
         super().__init__()
@@ -88,7 +87,6 @@ class SpatiotempTransformerModel(ModelMixin, ConfigMixin):
                     attention_bias=attention_bias,
                     only_cross_attention=only_cross_attention,
                     upcast_attention=upcast_attention,
-                    model_config=model_config,
                     **transformer_kwargs,
                 )
                 for d in range(num_layers)
@@ -164,7 +162,6 @@ class SpatiotempTransformerModel(ModelMixin, ConfigMixin):
 
         return SpatiotempTransformerModelOutput(sample=output)
 
-import copy
 class SpatiotempTransformerBlock(nn.Module):
     def __init__(
         self,
@@ -178,20 +175,12 @@ class SpatiotempTransformerBlock(nn.Module):
         attention_bias: bool = False,
         only_cross_attention: bool = False,
         upcast_attention: bool = False,
-        use_sparse_causal_attention: bool = True,
         temp_attention_position: str = "after_feedforward",
-        model_config: dict = {}
     ):
         super().__init__()
         self.only_cross_attention = only_cross_attention
         self.use_ada_layer_norm = num_embeds_ada_norm is not None
-        self.use_sparse_causal_attention = use_sparse_causal_attention
-        # For safety, freeze the model_config
-        self.model_config = copy.deepcopy(model_config)
-        if 'least_sc_channel' in model_config:
-            if dim< model_config['least_sc_channel']:
-                self.model_config['SparseCausalAttention_index'] = []
-        
+
         self.temp_attention_position = temp_attention_position
         temp_attention_positions = ["after_spatial", "after_cross", "after_feedforward"]
         if temp_attention_position not in temp_attention_positions:
@@ -199,9 +188,9 @@ class SpatiotempTransformerBlock(nn.Module):
                 f"`temp_attention_position` must be one of {temp_attention_positions}"
             )
 
-        # 1. Spatial-Attn
-        spatial_attention = SparseCausalAttention if use_sparse_causal_attention else CrossAttention
-        self.attn1 = spatial_attention(
+        # 1. Spatial-Attn（网格内全自注意力：同网格各帧 token 拼为单图，标准 self-attention
+        # 天然覆盖帧间交互，不再使用 Tune-A-Video 式稀疏因果 gather）
+        self.attn1 = CrossAttention(
             query_dim=dim,
             heads=num_attention_heads,
             dim_head=attention_head_dim,
@@ -303,10 +292,6 @@ class SpatiotempTransformerBlock(nn.Module):
         )
         if self.only_cross_attention:
             kwargs.update(encoder_hidden_states=encoder_hidden_states)
-        if self.use_sparse_causal_attention:
-            kwargs.update(clip_length=clip_length)
-        if 'SparseCausalAttention_index' in self.model_config.keys():
-            kwargs.update(SparseCausalAttention_index = self.model_config['SparseCausalAttention_index'])
         hidden_states = hidden_states + self.attn1(**kwargs)
 
         # 拆网格   
@@ -385,93 +370,3 @@ class SpatiotempTransformerBlock(nn.Module):
 
 
 
-class SparseCausalAttention(CrossAttention):
-
-    def forward(
-        self,
-        hidden_states,
-        encoder_hidden_states=None,
-        attention_mask=None,
-        clip_length: int = None,
-        SparseCausalAttention_index: list = [-1, 'first']
-    ):
-        if (
-            self.added_kv_proj_dim is not None
-            or encoder_hidden_states is not None
-            or attention_mask is not None
-        ):
-            raise NotImplementedError
-
-        if self.group_norm is not None:
-            hidden_states = self.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
-
-        query = self.to_q(hidden_states)
-        dim = query.shape[-1]
-        query = self.reshape_heads_to_batch_dim(query)
-
-        key = self.to_k(hidden_states)
-        value = self.to_v(hidden_states)
-
-        if clip_length is not None:
-            key = rearrange(key, "(b f) d c -> b f d c", f=clip_length)
-            value = rearrange(value, "(b f) d c -> b f d c", f=clip_length)
-
-
-            #  *********************** Start of Spatial-temp attention **********
-            # frame_index_list = []
-            # # print(f'SparseCausalAttention_index {str(SparseCausalAttention_index)}')
-            # if len(SparseCausalAttention_index) > 0:
-            #     for index in SparseCausalAttention_index:
-            #         if isinstance(index, str):
-            #             if index == 'first':
-            #                 frame_index = [0] * clip_length
-            #             if index == 'last':
-            #                 frame_index = [clip_length-1] * clip_length
-            #             if (index == 'mid') or (index == 'middle'):
-            #                 frame_index = [int(clip_length-1)//2] * clip_length
-            #         else:
-            #             assert isinstance(index, int), 'relative index must be int'
-            #             frame_index = torch.arange(clip_length) + index
-            #             frame_index = frame_index.clip(0, clip_length-1)
-                        
-            #         frame_index_list.append(frame_index)
-                
-            #     key = torch.cat([   key[:, frame_index] for frame_index in frame_index_list
-            #                         ], dim=2)
-            #     value = torch.cat([ value[:, frame_index] for frame_index in frame_index_list
-            #                         ], dim=2)
-
-
-            #  *********************** End of Spatial-temp attention **********
-            key = rearrange(key, "b f d c -> (b f) d c", f=clip_length)
-            value = rearrange(value, "b f d c -> (b f) d c", f=clip_length)
-        
-        
-        key = self.reshape_heads_to_batch_dim(key)
-        value = self.reshape_heads_to_batch_dim(value)
-        #print("q.shape=",query.shape)
-        #print("k.shape=",key.shape)
-        #print("v.shape=",value.shape)
-        #print("attention_mask.shape=",attention_mask.shape)
-
-        
-        if self._use_memory_efficient_attention_xformers:
-            hidden_states = self._memory_efficient_attention_xformers(query, key, value, attention_mask)
-            #print("attention_mask.shape=",attention_mask.shape)
-            # Some versions of xformers return output in fp32, cast it back to the dtype of the input
-            hidden_states = hidden_states.to(query.dtype)
-        else:
-            if self._slice_size is None or query.shape[0] // self._slice_size == 1:
-                hidden_states = self._attention(query, key, value, attention_mask)
-            else:
-                hidden_states = self._sliced_attention(
-                    query, key, value, hidden_states.shape[1], dim, attention_mask
-                )
-
-        # linear proj
-        hidden_states = self.to_out[0](hidden_states)
-
-        # dropout
-        hidden_states = self.to_out[1](hidden_states)
-        return hidden_states
-    

@@ -43,7 +43,7 @@ class EmptyControl:
 
 
 def compute_need_steps(prompts, num_steps, cross_replace_steps, self_replace_steps,
-                       blend_latents, tokenizer) -> dict:
+                       blend_latents, tokenizer, latent_replace_steps=(0.2, 0.8)) -> dict:
     """计算反演期需要存储的步集合（编辑消费的精确镜像）。
 
     编辑步 i 消费：cross replace（alpha[i]>0 时）、self 重放（self_replace 窗口内，
@@ -59,8 +59,10 @@ def compute_need_steps(prompts, num_steps, cross_replace_steps, self_replace_ste
 
     lat_edit = set()
     if blend_latents:
-        # SpatialBlender 的 latent blend 窗口（make_controller 中固定 0.2 / 0.8）
-        s_win, e_win = int(0.2 * num_steps), int(0.8 * num_steps)
+        # SpatialBlender 的 latent blend 窗口（yaml 可配 latent_replace_steps，标量 x 视为 (0, x)）
+        if isinstance(latent_replace_steps, (int, float)):
+            latent_replace_steps = (0.0, float(latent_replace_steps))
+        s_win, e_win = int(latent_replace_steps[0] * num_steps), int(latent_replace_steps[1] * num_steps)
         lat_edit = {i for i in range(num_steps) if s_win < i + 1 < e_win}
 
     inv = lambda i: num_steps - 1 - i
@@ -113,6 +115,11 @@ class AttentionControlEdit(AttentionControl, abc.ABC):
                     blend_dict[key].append(concate_attention)
             x_t = self.latent_blend(x_t=torch.cat([inverted_latents, x_t], dim=0),
                                     attention_store=blend_dict)[1:, ...]
+        elif self.latent_blend is not None:
+            # 该步没有配对的反演 latent（窗口外）也要推进 blend 计数：
+            # SpatialBlender 内部按 counter 判定 blend 窗口（counter = 编辑步序），
+            # 漏加会让窗口整体后移、前段 blend 步丢失（对齐 main-3 每步调用的语义）
+            self.latent_blend.counter += 1
         self.between_steps()
         return x_t
 
@@ -319,6 +326,7 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
                     blend_words=None, equilizer_params=None,
                     replay_provider: ReplayProvider = None, use_inversion_attention: bool = True,
                     blend_self_th: float = (0.3, 0.3), blend_latents_th: float = (0.3, 0.3),
+                    latent_replace_steps=(0.2, 0.8),
                     NUM_DDIM_STEPS = None, blend_latents=False, blend_self_attention=False,
                     save_path=None, grid_sizeH: int = 2, grid_sizeW: int = 2) -> AttentionControlEdit:
     if (blend_words is None) or (blend_words == 'None'):
@@ -326,13 +334,17 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
         attention_blend = None
     else:
         if blend_latents:
+            # latent blend 时间窗口：标量 x 视为 (0, x)；列表/元组 [a, b] 原样使用（比例，乘以总步数）
+            if isinstance(latent_replace_steps, (int, float)):
+                latent_replace_steps = (0.0, float(latent_replace_steps))
+            start_blend, end_blend = float(latent_replace_steps[0]), float(latent_replace_steps[1])
             latent_blend = SpatialBlender(prompts, blend_words,
-                                          start_blend=0.2, end_blend=0.8,
+                                          start_blend=start_blend, end_blend=end_blend,
                                           tokenizer=tokenizer, th=blend_latents_th,
                                           NUM_DDIM_STEPS=NUM_DDIM_STEPS,
                                           save_path=(save_path + '/latent_blend_mask') if save_path else None,
                                           prompt_choose='both')
-            print(f'Blend latent mask with threshold {blend_latents_th}')
+            print(f'Blend latent mask with threshold {blend_latents_th}, window {tuple(latent_replace_steps)}')
         else:
             latent_blend = None
         if blend_self_attention:
