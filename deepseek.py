@@ -67,8 +67,16 @@ D3. Global style transfer / change of the whole scene:
 
 D4. Motion editing recognition: judge not only whether the action/motion of the
     subject is changed in the prompts, but ALSO whether the target prompt ends
-    with a motion guidance signal map filename. If either holds, it is motion
-    editing: Local Editing, no mask, fine-tune the Motion module (one-shot).
+    with one of these two motion signals:
+      (a) a motion guidance signal map filename, e.g. "(dance_pose_map_03.gif)";
+      (b) a MotionEditor case tag — a parenthesized "case-<name>" such as
+          "（case-1）" — which names the MotionEditor project whose reference
+          motion re-drives the subject.
+    If any holds, it is motion editing: Local Editing, no mask, fine-tune the
+    Motion module (one-shot). Note that for motion editing the source and target
+    prompts may be word-for-word identical ("a girl is dancing" -> "a girl is
+    dancing（case-1）"): the ONLY difference is the appended case tag, and that
+    tag alone is a sufficient and decisive motion-editing signal.
 """
 
 # ============================================================
@@ -159,6 +167,28 @@ Output:
       Since changing the motion involves large structural (pose) changes of the
       subject across video frames, we need to invoke the motion editing module and
       fine-tune it on the motion guidance signal map, i.e. one-shot (Motion module).'}
+
+Example 5 — motion editing via MotionEditor case tag (no mask, one-shot Motion module)
+Input:
+SOURCE_PROMPT: a girl is dancing
+TARGET_PROMPT: a girl is dancing（case-1）
+Output:
+{"model_adaption": 'no-mask, one-shot(Motion module)',
+ "Thinking":
+ '1.Prompt comparison analysis:
+      The source and target prompts are word-for-word identical, but the target
+      prompt ends with a MotionEditor case tag "（case-1）".
+  2.Editing type:
+      The case tag indicates that the motion of the subject is re-driven by the
+      reference motion of the MotionEditor case, which belongs to the editing
+      type: Motion Editing.
+  3.Mask mechanism:
+      Motion editing does not need a mask mechanism; the motion of the subject is
+      driven directly by the reference motion of the MotionEditor case.
+  4.Fine-tuning:
+      Since changing the motion involves large structural (pose) changes of the
+      subject across video frames, we need to invoke the motion editing module
+      and fine-tune it, i.e. one-shot (Motion module).'}
 """
 
 PROMPT_OUTPUT_SPEC = """\

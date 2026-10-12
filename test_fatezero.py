@@ -1,7 +1,16 @@
 import os
 import sys
+import re
+import time
+import shutil
 import warnings
 warnings.filterwarnings("ignore")
+
+# 端到端计时起点：紧跟指令启动、在 torch 等重依赖 import 之前打点，
+# use_time_EndToEnd 因此覆盖 模块加载 -> DeepSeek 路由 -> (motion: 补训+推理+复制
+# / 其他: 反演+去噪+保存) 的全程，与 test() 内的分段 [TIMING] 口径衔接。
+_T_E2E_START = time.time()
+
 from glob import glob
 from typing import Optional, Dict
 from omegaconf import OmegaConf
@@ -108,10 +117,58 @@ DEFAULT_PRETRAINED = "/mnt/fspace/hproject/model/stable-diffusion-v1-5"
 MOTIONEDITOR_PYTHON = "/home/user4/miniconda3/envs/motioneditor/bin/python3.10"
 TUNE_DONE_MARKER = "tune_done.marker"
 
+# 外层 accelerate launch 注入的分布式环境变量。嵌套启动的单进程子任务（tune /
+# MotionEditor）若继承它们，其 Accelerator 会按环境变量误判自己处于多进程
+# MULTI_GPU 世界（还会去连父进程的 master 端口），单卡执行卡死在第一次集合通信
+# ——即使显式传了 --num_processes=1 也拦不住（子进程读的是环境变量）。
+_DIST_ENV_KEYS = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE", "GROUP_RANK",
+                  "MASTER_ADDR", "MASTER_PORT", "TORCHELASTIC_RUN_ID",
+                  "TORCHELASTIC_RESTART_COUNT", "TORCHELASTIC_ERROR_FILE",
+                  "ACCELERATE_USE_DEEPSPEED", "ACCELERATE_USE_CPU",
+                  "ACCELERATE_MIXED_PRECISION")
+
+
+def _subproc_env_single_gpu():
+    """给单卡子任务（MotionEditor / 单进程 ELVE 下的 tune）构造干净环境：
+    剥离外层分布式变量 + CUDA_VISIBLE_DEVICES 收敛为单卡首卡。"""
+    env = dict(os.environ)
+    for k in _DIST_ENV_KEYS:
+        env.pop(k, None)
+    cvd = env.get("CUDA_VISIBLE_DEVICES", "")
+    env["CUDA_VISIBLE_DEVICES"] = cvd.split(",")[0].strip() if cvd else "0"
+    return env
+
+
+def _subproc_env_multi_gpu():
+    """双卡 ELVE 下的 tune 子进程环境：同样剥离外层分布式变量（避免嵌套
+    accelerate 继承父进程的 rendezvous 地址、误连父进程组），但保留全部
+    可见 GPU——run_tuning_1.py 按 torch.cuda.device_count() 走多卡分支
+    （_set_static_graph / alternate_multiGPU），数据集也按可见卡数分帧
+    （TuneAVideoDataset 的 GPU_num），必须所有卡可见 + 分布式启动。"""
+    env = dict(os.environ)
+    for k in _DIST_ENV_KEYS:
+        env.pop(k, None)
+    return env
+
+
+def _pick_free_port():
+    """给嵌套 accelerate launch 选空闲端口：父进程已占默认 rendezvous 端口，
+    嵌套的多进程启动若不换端口会连到父进程组上。"""
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+# 动作编辑路由标记：target prompt 尾部的 （case-N）。source/target 文本可能完全相同
+# （如 "a girl is dancing" -> "a girl is dancing（case-1）"），仅凭语义 LLM 分不清是
+# 动作编辑；该标记既告诉路由这是动作编辑（-> one-shot(Motion module)），又指定使用
+# 哪套 MotionEditor case 资产（原视频/目标视频/yaml 全套来自该 case）。
+_MOTION_CASE_RE = re.compile(r'[（(]\s*case[-_]?\s*([0-9A-Za-z][0-9A-Za-z_-]*)\s*[)）]', re.IGNORECASE)
+
 
 def _is_main_process():
     """多进程(accelerate launch)时仅 RANK/LOCAL_RANK=0 做 LLM 决策与 tune，
-    其余进程读它写出的决策文件并等待微调产物；单进程直跑时恒为 True。"""
+    其余进程读它写进 yaml 的决策并等待微调产物；单进程直跑时恒为 True。"""
     for var in ("RANK", "LOCAL_RANK", "SLURM_PROCID"):
         if var in os.environ:
             return int(os.environ[var]) == 0
@@ -129,9 +186,38 @@ def classify_adaption(adaption):
     return "zero-shot"
 
 
-def _decision_path(config):
-    """rank0 与其余进程交换 LLM 决策的确定性文件路径（多 GPU 时用）"""
-    return config + ".llm_decision"
+def _read_llm_decision(yaml_path):
+    """从 yaml 读 llm_decision 块；不存在/解析失败（rank0 正在改写）返回 None。"""
+    try:
+        d = OmegaConf.load(yaml_path).get("llm_decision", None)
+    except Exception:
+        return None
+    return dict(d) if d is not None else None
+
+
+def _strip_llm_decision(yaml_path):
+    """整块删掉 yaml 里的 llm_decision（rank0 开新一轮决策前清场，不留占位值）。"""
+    with open(yaml_path) as f:
+        text = f.read()
+    new_text = re.sub(r'(?ms)^llm_decision:.*?(?=^\S|\Z)', '', text).rstrip() + '\n'
+    if new_text != text:
+        with open(yaml_path, "w") as f:
+            f.write(new_text)
+
+
+def _write_llm_decision(yaml_path, adaption, paradigm):
+    """把 rank0 的 LLM 决策写进编辑 yaml 本身（不另立文件）。
+
+    只替换文件里的 llm_decision 块、原样保留其余内容与注释；written_at 时间戳
+    供其余进程拒绝上一轮运行留下的旧决策。
+    """
+    _strip_llm_decision(yaml_path)
+    block = (f"llm_decision:  # 自动写入：多卡时 rank0 的 DeepSeek 决策（重跑会覆盖；Use_DeepSeek=False 时忽略）\n"
+             f"  adaption: '{adaption}'\n"
+             f"  paradigm: {paradigm}\n"
+             f"  written_at: {time.time()}\n")
+    with open(yaml_path, "a") as f:
+        f.write(block)
 
 
 def _wait_for_file(path, timeout_s, what, fresh_after=None):
@@ -189,16 +275,32 @@ def run_tune(tune_config_path):
         print(f"[tune] 已存在微调模型 {output_dir}，跳过 tune（如需重训请删除该目录）")
     else:
         accelerate_bin = os.path.join(os.path.dirname(sys.executable), "accelerate")
-        launcher = [accelerate_bin, "launch", "--num_processes=1"] \
-            if os.path.exists(accelerate_bin) else [sys.executable]
+        # tune 的卡数跟随 ELVE 的启动方式：双卡 ELVE（accelerate launch
+        # --num_processes=2）-> 双卡 tune（数据集分帧 + alternate_multiGPU
+        # 跨 rank 换片）；单进程 ELVE -> 固定单卡。两种情况下都必须剥离外层
+        # accelerate 的分布式环境变量；多进程嵌套启动还要另选 rendezvous 端口。
+        world = int(os.environ.get("WORLD_SIZE", "1") or 1)
+        if world > 1:
+            env = _subproc_env_multi_gpu()
+            cvd = env.get("CUDA_VISIBLE_DEVICES", "")
+            n_vis = len([x for x in cvd.split(",") if x.strip()]) if cvd \
+                else torch.cuda.device_count()
+            n_proc = max(1, min(world, n_vis))
+        else:
+            env = _subproc_env_single_gpu()
+            n_proc = 1
+        if os.path.exists(accelerate_bin):
+            launcher = [accelerate_bin, "launch", f"--num_processes={n_proc}"]
+            if n_proc > 1:
+                launcher.append(f"--main_process_port={_pick_free_port()}")
+        elif n_proc > 1:
+            # 多卡 tune 必须分布式启动（单进程+多卡可见会走 _set_static_graph 崩溃）
+            raise SystemExit(f"[tune] 多卡 tune 需要 accelerate launch，未找到: {accelerate_bin}")
+        else:
+            launcher = [sys.executable]
         cmd = launcher + ["run_tuning_1.py", "--config", tune_config_path]
-        # 自主启动固定单卡：run_tuning_1.py 的多卡分支（_set_static_graph /
-        # alternate_multiGPU）要求分布式多进程启动，单进程 + 多卡可见会崩溃
-        env = dict(os.environ)
-        cvd = env.get("CUDA_VISIBLE_DEVICES", "")
-        env["CUDA_VISIBLE_DEVICES"] = cvd.split(",")[0].strip() if cvd else "0"
-        print(f"[tune] one-shot(temporal module) -> 启动微调: {' '.join(cmd)}"
-              f"  (CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']})")
+        print(f"[tune] one-shot(temporal module) -> 启动微调({n_proc}进程): {' '.join(cmd)}"
+              f"  (CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES', '')})")
         subprocess.run(cmd, check=True, cwd=PROJECT_ROOT, env=env)
         assert "unet" in os.listdir(output_dir), \
             f"tune 结束但 {output_dir} 下没有 unet/，微调产物不完整"
@@ -209,17 +311,97 @@ def run_tune(tune_config_path):
 
 
 def launch_motioneditor(me_config=None):
-    """阶段3：one-shot(Motion module) —— 启动外置 MotionEditor 模块。
+    """阶段3：one-shot(Motion module) —— MotionEditor 全自动流水线。
 
-    MotionEditor 尚未融合进 ELVE pipeline（独立代码库，依赖 py3.10 +
-    diffusers 0.15.1 的 conda env motioneditor），因此用子进程 + 绝对解释器
-    路径启动。默认跑 case-4（checkpoints 已就绪，直接推理即可验证模块启动）。
+    DeepSeek 路由到 motion 并给出 case 后，后续操作全部自动执行，无需人工干预：
+      1. 检查数据资产（原视频/姿态条件是用户提供的，无法自动补齐，缺失即报错）；
+      2. 检查两级训练产物——背景微调 checkpoint（train_bg.py）与 adapter
+         （train_adaptor.py），缺哪级补训哪级；背景重训时 adapter 必须跟着重训
+         （它以 one_stage_checkpoint 的背景模型为条件）；
+      3. 跑推理（inference.py，null-text inversion + 采样）；
+      4. 把结果从 MotionEditor/outputs/ 复制到 ELVE/result/ 方便用户直接查看。
+    MotionEditor 是独立代码库（py3.10 + diffusers 0.15.1 的 conda env），
+    用子进程 + 绝对解释器路径启动；yaml 内的相对路径以 MotionEditor 根目录为基准。
     """
     me_root = os.path.join(PROJECT_ROOT, "MotionEditor")
     me_config = me_config or os.path.join("configs", "case-4", "eval-motion.yaml")
-    cmd = [MOTIONEDITOR_PYTHON, "inference.py", f"--config={me_config}"]
-    print(f"[MotionEditor] one-shot(Motion module) -> 外置模块启动: {' '.join(cmd)}  (cwd={me_root})")
-    subprocess.run(cmd, cwd=me_root, check=True)
+    me_config_abs = me_config if os.path.isabs(me_config) else os.path.join(me_root, me_config)
+    if not os.path.exists(me_config_abs):
+        raise SystemExit(
+            f"[MotionEditor] 配置不存在: {me_config_abs}\n"
+            f"  请检查 motioneditor-yaml 字段或 target prompt 里的 case 标记是否写对了")
+    eval_cfg = OmegaConf.load(me_config_abs)
+
+    def _me_abs(p):  # MotionEditor yaml 内的相对路径以 me_root 为基准
+        return p if os.path.isabs(str(p)) else os.path.normpath(os.path.join(me_root, str(p)))
+
+    def _me_run(script, cfg_rel, hint):
+        cmd = [MOTIONEDITOR_PYTHON, script, f"--config={cfg_rel}"]
+        print(f"[MotionEditor] {hint}: {' '.join(cmd)}  (cwd={me_root})")
+        # 同 tune：剥离外层分布式环境变量 + 收敛单卡（双卡 ELVE 的 motion 路由下，
+        # MotionEditor 的 Accelerator 同样会被继承的 RANK/WORLD_SIZE 误导入多进程世界）
+        subprocess.run(cmd, cwd=me_root, check=True, env=_subproc_env_single_gpu())
+
+    # 1) 数据资产：源视频/条件图是用户提供的原始素材，缺失只能报错
+    video_dir = _me_abs(eval_cfg["input_data"]["video_dir"])
+    if not os.path.isdir(video_dir):
+        raise SystemExit(
+            f"[MotionEditor] 数据目录不存在: {video_dir}\n"
+            f"  原视频/姿态条件无法自动补齐，请先按 case 数据集结构准备 "
+            f"（images/ source_condition/ target_condition/ frame_list.txt 等）")
+
+    # 2) 训练产物自检 + 自动补训（train 配置与 eval 配置同目录）
+    bg_ckpt = _me_abs(eval_cfg["resume_from_checkpoint"])
+    adapter_pth = _me_abs(eval_cfg["adapter_weight_path"])
+    bg_missing = not (os.path.isdir(bg_ckpt)
+                      and any(f.startswith(("model.", "pytorch_model")) for f in os.listdir(bg_ckpt)))
+    ad_missing = not os.path.isfile(adapter_pth)
+    if not (bg_missing or ad_missing):
+        print(f"[MotionEditor] 训练产物齐备:\n"
+              f"  背景 checkpoint: {bg_ckpt}\n"
+              f"  adapter 权重:    {adapter_pth}\n  直接推理")
+    else:
+        case_dir = os.path.dirname(me_config)  # 如 configs/case-1
+        train_yamls = {"train_bg.py": os.path.join(case_dir, "train-bg.yaml"),
+                       "train_adaptor.py": os.path.join(case_dir, "train-motion.yaml")}
+        need = []
+        if bg_missing:
+            need.append("train_bg.py")                       # 背景缺失 -> 补训背景
+        if bg_missing or ad_missing:
+            need.append("train_adaptor.py")                  # adapter 缺失，或背景重训后必须跟着重训
+        for script in need:
+            yml_abs = train_yamls[script] if os.path.isabs(train_yamls[script]) \
+                else os.path.join(me_root, train_yamls[script])
+            if not os.path.exists(yml_abs):
+                raise SystemExit(
+                    f"[MotionEditor] 训练产物缺失且找不到训练配置 {yml_abs}，无法自动补训")
+            print(f"[MotionEditor] {'背景 checkpoint' if script == 'train_bg.py' else 'adapter 权重'}"
+                  f" 缺失/失效 -> 自动补训（约 5 分钟/级）")
+            _me_run(script, train_yamls[script], f"自动补训 {script}")
+
+    # 3) 推理
+    _me_run("inference.py", me_config, "one-shot(Motion module) 推理")
+
+    # 4) 结果复制到 ELVE/result/（覆盖旧拷贝，MotionEditor/outputs 原产物保留）
+    out_dir = _me_abs(eval_cfg["output_dir"])
+    if not os.path.isdir(out_dir):
+        raise SystemExit(f"[MotionEditor] 推理结束但输出目录不存在: {out_dir}")
+    result_root = os.path.join(PROJECT_ROOT, "result")
+    dst = os.path.join(result_root, os.path.basename(out_dir))
+    if os.path.isdir(dst):
+        shutil.rmtree(dst)
+    shutil.copytree(out_dir, dst)
+    print(f"[MotionEditor] 结果已复制到 {dst}（原产物仍在 {out_dir}）")
+
+
+def _extract_motion_case(Omegadict):
+    """从 editing_prompts 里提取 MotionEditor case 标记（（case-1） 等），返回 case 名或 None。"""
+    prompts = Omegadict.get("editing_config", {}).get("editing_prompts", []) or []
+    for p in prompts:
+        m = _MOTION_CASE_RE.search(str(p))
+        if m:
+            return m.group(1)
+    return None
 
 
 def llm_decision_routing(Omegadict, config):
@@ -228,27 +410,62 @@ def llm_decision_routing(Omegadict, config):
     流式调用 DeepSeek（model_adaption 前置输出，不等 Thinking 生成完），
     按解析结果决定模型配置，返回需要覆盖到 edit 配置上的字段 dict；
     判定 one-shot(Motion module) 时直接启动外置 MotionEditor 并返回 None。
+
+    target prompt 尾部的 （case-N） 标记表示动作编辑（提示词 D4 已同步该约定）；
+    即使 LLM 误判也强制校正为 motion，并按 case 名选用 MotionEditor 对应资产。
     """
     paradigm = None
-    if _is_main_process():
-        # 先清掉上一轮的决策文件，避免多 GPU 时其余进程读到旧决策
-        if os.path.exists(_decision_path(config)):
-            os.remove(_decision_path(config))
+    motion_case = _extract_motion_case(Omegadict)
+    # DeepSeek 决策仅在多 GPU（accelerate launch）时需要跨进程传递：所有 rank 同时
+    # 启动而决策要 ~1s 才返回，其余进程拿不到 rank0 的内存结果，改由 rank0 把决策
+    # 写进编辑 yaml 本身（llm_decision 块，不另立文件）。单进程不读也不写；
+    # Use_DeepSeek=False 时路由整体跳过，yaml 里残留的 llm_decision 块不会被读取。
+    multi_proc = any(v in os.environ for v in ("RANK", "LOCAL_RANK", "SLURM_PROCID"))
+    # 临时测量开关（评测用）：ELVE_FORCE_PARADIGM=zero-shot|temporal|motion 时跳过
+    # DeepSeek 调用，直接按指定决策路由；各 rank 从同一环境变量读取，天然一致，
+    # 无需 yaml 交换。不设置时完全不影响正常 DeepSeek 流程。
+    forced = os.environ.get("ELVE_FORCE_PARADIGM", "").strip().lower()
+    if forced:
+        if forced not in ("zero-shot", "temporal", "motion"):
+            raise SystemExit(f"[ELVE] ELVE_FORCE_PARADIGM 只接受 zero-shot/temporal/motion，got {forced!r}")
+        print(f"[ELVE] ELVE_FORCE_PARADIGM={forced} 生效：跳过 DeepSeek，直接按该决策路由")
+        paradigm = forced
+    elif _is_main_process():
+        # 先整块清掉上一轮写进 yaml 的旧决策，避免其余进程读到
+        if multi_proc:
+            _strip_llm_decision(config)
         source_prompt = Omegadict["dataset_config"]["prompt"]
         target_prompt = list(Omegadict["editing_config"]["editing_prompts"])
         adaption, info = deepseek.LLM_stream(source_prompt, target_prompt)
         paradigm = classify_adaption(adaption)
-        with open(_decision_path(config), "w") as f:  # 多 GPU 时同步给其余进程
-            json.dump({"adaption": adaption, "paradigm": paradigm}, f)
+        if motion_case is not None and paradigm != "motion":
+            print(f"[ELVE] target prompt 带 MotionEditor case 标记（case-{motion_case}），"
+                  f"LLM 判定为 {paradigm}，强制校正为 motion")
+            paradigm = "motion"
+            adaption = "no-mask, one-shot(Motion module)"
+        if multi_proc:  # 多 GPU 时同步给其余进程
+            _write_llm_decision(config, adaption, paradigm)
     else:
-        decision = _wait_for_file(_decision_path(config), timeout_s=600,
-                                  what="rank0 的 LLM 决策", fresh_after=time.time() - 2)
-        paradigm = json.loads(decision)["paradigm"]
+        # 轮询 yaml 里的 llm_decision 块；written_at 早于本轮启动的视为上一轮旧值
+        t_accept = time.time() - 30  # 30s 容忍 rank 间启动偏移
+        t0 = time.time()
+        while True:
+            d = _read_llm_decision(config)
+            if d and d.get("written_at", 0) >= t_accept:
+                paradigm = d["paradigm"]
+                break
+            if time.time() - t0 > 600:
+                raise TimeoutError(f"等待 rank0 写入 yaml 的 LLM 决策超时: {config}")
+            time.sleep(5)
 
     if paradigm == "motion":
         # 阶段3：MotionEditor 为外置模块，启动后即返回，不进入 ELVE pipeline
         if _is_main_process():
-            launch_motioneditor(Omegadict.get("motioneditor-yaml", None))
+            me_yaml = Omegadict.get("motioneditor-yaml", None)
+            if me_yaml is None and motion_case is not None:
+                # case 标记指定资产：原视频/目标视频/yaml 全套来自该 case
+                me_yaml = os.path.join("configs", f"case-{motion_case}", "eval-motion.yaml")
+            launch_motioneditor(me_yaml)
         return None
 
     overrides = {}
@@ -265,8 +482,11 @@ def llm_decision_routing(Omegadict, config):
             tune_output = OmegaConf.load(tune_yaml)["output_dir"]
             if not os.path.isabs(tune_output):
                 tune_output = os.path.join(PROJECT_ROOT, tune_output)
+            # 新鲜度锚定在本进程模块加载时刻（而非轮询时刻）：产物已存在时 rank0
+            # 会瞬时跳过训练并立刻重写 marker，若 rank1 import 较慢、开始轮询晚于
+            # rank0 的写入，按轮询时刻锚点会把新鲜 marker 误判为旧值而死等超时
             _wait_for_file(os.path.join(tune_output, TUNE_DONE_MARKER), timeout_s=4 * 3600,
-                           what="rank0 的 tune 完成", fresh_after=time.time() - 2)
+                           what="rank0 的 tune 完成", fresh_after=_T_E2E_START - 5)
             tuned_dir = tune_output
         overrides["pretrained_model_path"] = tuned_dir
     else:
@@ -788,4 +1008,13 @@ def run(config):
 if __name__ == "__main__":
     import warnings
     warnings.filterwarnings("ignore", module="torchvision.io.image")
-    run()
+    _code = 0
+    try:
+        run()
+    except SystemExit as e:
+        # click standalone 模式正常收尾会自己 sys.exit(0)，异常退出也可能是 SystemExit；
+        # 捕获后统一在这里打端到端耗时，再按原退出码退出
+        _code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    _rank = os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0"))
+    print(f"[TIMING] rank={_rank} use_time_EndToEnd={time.time()-_T_E2E_START:.4f}", flush=True)
+    sys.exit(_code)

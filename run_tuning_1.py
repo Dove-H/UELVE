@@ -1,16 +1,12 @@
 # From https://github.com/showlab/Tune-A-Video/blob/main/train_tuneavideo.py
 import argparse
-import datetime
 import logging
 import inspect
 import math
 import os
-import time
-import warnings
-warnings.filterwarnings("ignore")
 from typing import Dict, Optional, Tuple
 from omegaconf import OmegaConf
-from diffusers import AutoencoderKL, DDPMScheduler, DDIMScheduler, DPMSolverSinglestepScheduler
+from diffusers import AutoencoderKL, DDPMScheduler, DDIMScheduler
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -38,15 +34,16 @@ def main(
     pretrained_model_path: str,
     output_dir: str,
     train_data: Dict,
-    validation_data: Dict,
+    validation_data: Dict,  # 仅用于吸收 yaml 字段，训练中已不使用（验证/反演逻辑已剥离）
     validation_steps: int = 100,
     trainable_modules: Tuple[str] = (
-        "attn1",
+        "attn1.to_q",
         "attn2.to_q",
         "attn_temp",
     ),
     train_batch_size: int = 1,
     max_train_steps: int = 500,
+    ddim_grid_steps: int = 50,  # timestep 与推理对齐：训练只在 DDIM 推理格点上采样，此值=编辑 yaml 的 num_inference_steps
     learning_rate: float = 3e-5,
     scale_lr: bool = False,
     lr_scheduler: str = "constant",
@@ -57,7 +54,7 @@ def main(
     adam_epsilon: float = 1e-08,
     max_grad_norm: float = 1.0,
     gradient_accumulation_steps: int = 1,
-    gradient_checkpointing: bool = False,
+    gradient_checkpointing=True,
     checkpointing_steps: int = 500,
     resume_from_checkpoint: Optional[str] = None,
     mixed_precision: Optional[str] = "fp16",
@@ -101,25 +98,24 @@ def main(
         return latents_grid
 
     def process_with_unet(unet, latent_model_input, t, text_embeddings):
-
-        # 按网格中的帧数拆分成 [B, C, 1, H, W] 的单帧网格
-        #print("latent_model_input.shape=",latent_model_input.shape)
-        latent_grids = latent_model_input.split(1, dim=2)
-        #print("batch_size_grid=",batch_size_grid)
-        
-        # 存储每个单帧网格的 unet 处理结果
+        # 网格图之间相互独立：按 chunk 张沿 batch 维打包前向（数学等价于逐图串行，kernel 利用率更高，
+        # 激活总量不变——本来就是全部前向建一张图后一次 backward）。timesteps/text 条件对每张网格图相同，
+        # 打包时沿 batch 维复制。ELVE_TUNE_FWD_CHUNK=1 可退回逐图串行（等价性验证用）。
+        assert latent_model_input.shape[0] == 1, "process_with_unet 按 batch=1 设计"
+        n_grids = latent_model_input.shape[2]
+        chunk = int(os.environ.get("ELVE_TUNE_FWD_CHUNK", "4") or 4)
+        chunk = max(1, min(chunk, n_grids))
         noise_preds = []
-
-        # 逐帧处理每个单帧网格
-        for i, latent_grid in enumerate(latent_grids):
-            #print("latent_grid.shape=",latent_grid.shape)
-            noise_pred = unet(latent_grid, t, encoder_hidden_states=text_embeddings).sample
-            noise_preds.append(noise_pred)
-            #print("######",t)
-
-        # 将所有单帧网格的结果拼接回原始的网格形状 [B, C, G, H, W]
-        noise_pred = torch.cat(noise_preds, dim=2)
-    
+        for s in range(0, n_grids, chunk):
+            g = latent_model_input[:, :, s:s + chunk, :, :]            # [1, C, k, H, W]
+            k = g.shape[2]
+            flat = g.permute(2, 0, 1, 3, 4).reshape(k, g.shape[1], g.shape[3], g.shape[4]).unsqueeze(2)  # [k, C, 1, H, W]
+            tt = t.reshape(-1)[:1].repeat(k)                           # 同一 t 复制给 k 张网格图
+            eh = text_embeddings.expand(k, -1, -1)
+            pred = unet(flat, tt, encoder_hidden_states=eh).sample     # [k, C, 1, H, W]
+            noise_preds.append(pred)
+        # [G, C, 1, H, W] -> [1, C, G, H, W]
+        noise_pred = torch.cat(noise_preds, dim=0).permute(2, 1, 0, 3, 4)
         return noise_pred
 
     # 设置日志记录格式，并根据是否是主进程来设置不同的日志级别。
@@ -149,6 +145,13 @@ def main(
 
     # 加载预训练模型中的调度器、标记器和模型。
     noise_scheduler = DDPMScheduler.from_pretrained(pretrained_model_path, subfolder="scheduler")
+    # 训练 timestep 与推理对齐：只从 DDIM 推理实际访问的格点采样。
+    # SD1.5 scheduler（steps_offset=1 + leading 间距）50 步格点 = {981,961,...,21,1}，
+    # 推理也只在这些 t 上查询模型，训练分布与查询分布一致。
+    _grid_sched = DDIMScheduler.from_pretrained(pretrained_model_path, subfolder="scheduler")
+    _grid_sched.set_timesteps(ddim_grid_steps)
+    ddim_timestep_grid = torch.as_tensor(_grid_sched.timesteps, dtype=torch.long, device=accelerator.device)
+    print(f"[tune] timestep 对齐推理格点: {ddim_grid_steps} 个 t, min={int(ddim_timestep_grid.min())} max={int(ddim_timestep_grid.max())}")
     tokenizer = CLIPTokenizer.from_pretrained(pretrained_model_path, subfolder="tokenizer")
     text_encoder = CLIPTextModel.from_pretrained(pretrained_model_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(pretrained_model_path, subfolder="vae")
@@ -193,8 +196,6 @@ def main(
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset, batch_size=train_batch_size,shuffle=False
     )
-    ddim_inv_scheduler = DDIMScheduler.from_pretrained(pretrained_model_path, subfolder='scheduler')
-    ddim_inv_scheduler.set_timesteps(validation_data.num_inv_steps)
 
     lr_scheduler = get_scheduler(
         lr_scheduler,
@@ -300,27 +301,26 @@ def main(
         
         return latents
 
-    for step, batch in enumerate(train_dataloader):
-           if step==0:
-              
-                pixel_values = batch["pixel_values"]
-                pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
-                # 帧补齐：与推理（p2p_ddim_fatezero.prepare_latents_ddim_inverted）完全一致——
-                # 复制末帧到 grid_sizeH*grid_sizeW 的整数倍，保证微调学到的帧编排与推理相同
-                n_real = pixel_values.shape[2]
-                gA = grid_sizeH * grid_sizeW
-                n_pad = (-n_real) % gA
-                if n_pad:
-                    print(f'[tune] 帧数 {n_real} 非 {gA} 整数倍，复制末帧补齐到 {n_real + n_pad}')
-                    pixel_values = torch.cat([pixel_values, pixel_values[:, :, -1:, :, :].expand(-1, -1, n_pad, -1, -1)], dim=2)
-                pixel_values = grid.combine_frames_in_grid(pixel_values, grid_sizeH,grid_sizeW)
-                pixel_values = rearrange(pixel_values, "b c f h w -> b f c h w")
-                video_length = pixel_values.shape[1]
-                pixel_values = rearrange(pixel_values, "b f c h w -> (b f) c h w")
-                latents = encode_in_f_batches(pixel_values, vae)
-                latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
-                latents = latents * 0.18215
-                print("latents.shape=",latents.shape)
+    # 预编码本 rank 分片的 latents，全程复用（不再像 Tune-A-Video 原版那样每步重新 VAE 编码）。
+    # 帧补齐与推理（p2p_ddim_fatezero.prepare_latents_ddim_inverted）完全一致——
+    # 复制末帧到 grid_sizeH*grid_sizeW 的整数倍，保证微调学到的帧编排与推理相同
+    batch = next(iter(train_dataloader))
+    pixel_values = batch["pixel_values"]
+    pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
+    n_real = pixel_values.shape[2]
+    gA = grid_sizeH * grid_sizeW
+    n_pad = (-n_real) % gA
+    if n_pad:
+        print(f'[tune] 帧数 {n_real} 非 {gA} 整数倍，复制末帧补齐到 {n_real + n_pad}')
+        pixel_values = torch.cat([pixel_values, pixel_values[:, :, -1:, :, :].expand(-1, -1, n_pad, -1, -1)], dim=2)
+    pixel_values = grid.combine_frames_in_grid(pixel_values, grid_sizeH,grid_sizeW)
+    pixel_values = rearrange(pixel_values, "b c f h w -> b f c h w")
+    video_length = pixel_values.shape[1]
+    pixel_values = rearrange(pixel_values, "b f c h w -> (b f) c h w")
+    latents = encode_in_f_batches(pixel_values, vae)
+    latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
+    latents = latents * 0.18215
+    print("latents.shape=",latents.shape)
 
     # Train!
     total_batch_size = train_batch_size * accelerator.num_processes * gradient_accumulation_steps
@@ -348,6 +348,10 @@ def main(
     progress_bar = tqdm(range(global_step, max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
     if torch.cuda.device_count()>1:
+        # alternate_multiGPU 的 send/recv 与数据集帧分片均按双卡硬编码：
+        # 非双卡分布式启动在此拦下，避免静默帧划分错乱
+        assert dist.is_available() and dist.is_initialized() and dist.get_world_size() == 2, \
+            "多卡 tune 只支持 accelerate launch --num_processes=2（alternate_multiGPU 按双卡设计）"
         print("启用静态图")
         unet._set_static_graph()
     for epoch in range(first_epoch, num_train_epochs):
@@ -363,11 +367,8 @@ def main(
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
                 # Sample a random timestep for each video
-                if epoch%2==1:
-                   timesteps = 2 * torch.randint(0, (noise_scheduler.num_train_timesteps + 1) // 2, (bsz,), device=latents.device) + 1
-                else:
-                    timesteps = 2 * torch.randint(0, (noise_scheduler.num_train_timesteps + 1) // 2, (bsz,), device=latents.device)
-                timesteps = timesteps.long()
+                # 与推理对齐：从 DDIM 推理格点均匀采样（而非全区间 [0,1000) 均匀）
+                timesteps = ddim_timestep_grid[torch.randint(0, ddim_timestep_grid.shape[0], (bsz,), device=latents.device)]
                 # Add noise to the latents according to the noise magnitude at each timestep
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                 # Get the text embedding for conditioning
