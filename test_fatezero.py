@@ -50,6 +50,7 @@ from video_diffusion.data.dataset import ImageSequenceDataset
 from video_diffusion.common.util import get_time_string, get_function_args
 from video_diffusion.common.instantiate_from_config import instantiate_from_config
 from video_diffusion.pipelines.p2p_validation_loop import P2pSampleLogger
+from video_diffusion import elve_timing
 import numpy as np
 import utils.preprocesser_utils as pu
 import utils.image_process_utils as ipu
@@ -184,6 +185,11 @@ def classify_adaption(adaption):
     if "one-shot(temporalmodule)" in text:
         return "temporal"
     return "zero-shot"
+
+
+def is_no_mask(adaption):
+    """model_adaption 的掩码部分是否为 no-mask（全局编辑，无局部 mask）。"""
+    return "no-mask" in str(adaption or "").lower().replace(" ", "")
 
 
 def _read_llm_decision(yaml_path):
@@ -415,6 +421,7 @@ def llm_decision_routing(Omegadict, config):
     即使 LLM 误判也强制校正为 motion，并按 case 名选用 MotionEditor 对应资产。
     """
     paradigm = None
+    adaption = None  # 掩码决策(no-mask/mask)随 paradigm 一起路由；no-mask 时降 memory_frames
     motion_case = _extract_motion_case(Omegadict)
     # DeepSeek 决策仅在多 GPU（accelerate launch）时需要跨进程传递：所有 rank 同时
     # 启动而决策要 ~1s 才返回，其余进程拿不到 rank0 的内存结果，改由 rank0 把决策
@@ -453,6 +460,7 @@ def llm_decision_routing(Omegadict, config):
             d = _read_llm_decision(config)
             if d and d.get("written_at", 0) >= t_accept:
                 paradigm = d["paradigm"]
+                adaption = d.get("adaption", "")
                 break
             if time.time() - t0 > 600:
                 raise TimeoutError(f"等待 rank0 写入 yaml 的 LLM 决策超时: {config}")
@@ -469,6 +477,12 @@ def llm_decision_routing(Omegadict, config):
         return None
 
     overrides = {}
+    if is_no_mask(adaption):
+        # no-mask（全局编辑）无局部掩码，self-attention 重放特征全帧驻留显存，
+        # 16f 单卡在去噪第一步即 OOM（实测已分配 22.55GiB）；降为分级存储：
+        # 单卡帧数 >8 落盘 + 预取，mask 模式仍保持全驻留（memory_frames=16）
+        overrides["memory_frames"] = 8
+        print("[ELVE] no-mask(全局编辑)：memory_frames=8（特征分级存储，单卡超 8 帧落盘）")
     if paradigm == "temporal":
         # 阶段2：先自主跑 tune，再加载 tune 后的模型文件（本阶段固定走 FateZero 模式）
         overrides["method"] = "FateZero"
@@ -584,7 +598,8 @@ def control_preprocess(image_tensor, accelerator, controlnet, prepare_control_im
     return control_torch
 
 def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_config,
-               test_pipeline_config, video_length, accelerator, data_path, num_inference_steps, device,control_class):
+               test_pipeline_config, video_length, accelerator, data_path, num_inference_steps, device,control_class,
+               memory_frames: int = 16):
     
     # 动态导入 diffusers 相关模块
     import diffusers
@@ -643,9 +658,10 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
             grid_sizeW=grid_sizeW,
             accelerator=accelerator,
             data_path=data_path,
-            num_inference_steps=num_inference_steps
+            num_inference_steps=num_inference_steps,
+            memory_frames=memory_frames
         )
- 
+
     elif method == "ControlNet":
         # ControlNet的模型初始化
         print("ControlNet Model Path",const.PREPROCESSOR_DICT[control_class])
@@ -704,6 +720,45 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
 
     return pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image,scheduler_config
 
+
+def _save_edited_only_gif(logdir, step=0, idx=0):
+    """把纯编辑帧单独拼成 step1_edited.gif（不含原视频帧的拼接网格）。
+
+    数据源是各卡 logger 写的 step_{step}_{idx}_{0}_GPU{r}.gif（每卡只有自己那份帧、
+    且是纯编辑结果），按 GPU 序号顺序拼接即得全视频。单双卡（任意卡数）通用：
+    单卡时就是 GPU0 序列的归一化换名。"""
+    sample_dir = os.path.join(logdir, 'sample')
+    per_gpu = []
+    for p in glob(os.path.join(sample_dir, f'step_{step}_{idx}_0_GPU*.gif')):
+        if 'atten' in os.path.basename(p):
+            continue
+        m = re.search(r'GPU(\d+)\.gif$', p)
+        if m:
+            per_gpu.append((int(m.group(1)), p))
+    per_gpu.sort()
+    frames_all = []
+    duration = 100
+    for _, p in per_gpu:
+        gif = Image.open(p)
+        n = 0
+        try:
+            while True:
+                frames_all.append(gif.copy())
+                n += 1
+                gif.seek(n)
+        except EOFError:
+            pass
+        duration = gif.info.get('duration', duration)
+    if not frames_all:
+        print(f"[ELVE] 未找到纯编辑帧 gif（step_{step}_{idx}_0_GPU*.gif），跳过 edited 拼接")
+        return
+    # 与拼接网格版 step1.gif 配对命名
+    out = os.path.join(sample_dir, 'step1_edited.gif')
+    frames_all[0].save(out, save_all=True, append_images=frames_all[1:],
+                       loop=0, duration=duration)
+    print(f"[ELVE] 纯编辑帧汇总已写出: {out}（{len(per_gpu)} 卡共 {len(frames_all)} 帧）")
+
+
 def test(
     config: str,
     pretrained_model_path: str,
@@ -720,6 +775,7 @@ def test(
     batch_size: int = 1,
     model_config: dict = {},
     verbose: bool = True,
+    memory_frames: int = 16,   # FateZero 特征驻留阈值；LLM 路由 no-mask 时降为 8
     **kwargs
 ):
     # 使用上下文管理器设置 diffusers 环境
@@ -754,7 +810,22 @@ def test(
                 f"  单卡运行: CUDA_VISIBLE_DEVICES=0 python test_fatezero.py --config <yaml>\n"
                 f"  多卡运行: CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 "
                 f"test_fatezero.py --config <yaml>")
-        dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo')
+        with elve_timing.timer('comm_init_group'):
+            dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo')
+        # time_string 各 rank 独立计算：rank1 进 test() 前要轮询 yaml 等 rank0 的
+        # LLM 决策（可晚数秒），跨分钟边界时会得到不同的时间戳 → result 目录分裂成
+        # 两个（各 rank 只有自己的 GPU gif），末尾拼 step1.gif 时互相找不到而崩。
+        # 统一以 rank0 为准：yymmdd-HHMM 编码成 int 经 nccl 广播。
+        # 张量必须放在本 rank 的卡上（此刻 Accelerator 尚未创建、没人 set_device，
+        # 笼统的 'cuda' 会让所有 rank 都落在 cuda:0，NCCL 报 Duplicate GPU）
+        _lr = int(os.environ.get('LOCAL_RANK', os.environ.get('RANK', 0)))
+        _ts_enc = torch.tensor([int(time_string[:6] + time_string[7:])], dtype=torch.int64,
+                               device=f'cuda:{_lr}')
+        # 首个集合通信：含 NCCL communicator 的惰性建链（first_ms 单列在计时报告里）
+        with elve_timing.timer('comm_bcast_ts'):
+            dist.broadcast(_ts_enc, src=0)
+        _ts_v = int(_ts_enc.item())
+        time_string = f"{_ts_v // 10000:06d}-{_ts_v % 10000:04d}"
     # Control 深度图缓存目录只有 ControlNet 模式需要；FateZero 模式不再创建空目录
     Control_image_path = None
     if method == "ControlNet":
@@ -786,7 +857,8 @@ def test(
     pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image,scheduler_config = init_model(
         pretrained_model_path, method, grid_sizeH, grid_sizeW, model_config,
         test_pipeline_config, video_length, accelerator, dataset_config["path"],
-        editing_config['num_inference_steps'], accelerator.device,control_class)
+        editing_config['num_inference_steps'], accelerator.device,control_class,
+        memory_frames)
 
     prompt_ids = tokenizer(
         dataset_config["prompt"],
@@ -871,12 +943,18 @@ def test(
         if method == "FateZero":
             # FateZero（重构版 pipeline）：按编辑消费镜像裁剪存储，支持缓存复用
             p2p_cfg = editing_config['p2p_config'][0]
+            # blend_latents 的生效前提是 SpatialBlender 会建出来（make_controller 里
+            # blend_words 缺失/为 'None' 时不建 blender、latent 不会被消费）。
+            # 全局编辑注释 blend_words 后，need 镜像若仍按 blend_latents=True 排入
+            # latent 项，ReplayProvider 预取序列会与实际消费错位而断言崩。
+            _blend_words = p2p_cfg.get('blend_words', None)
+            _blender_on = _blend_words is not None and _blend_words != 'None'
             editing_params = dict(
                 source_prompt=dataset_config.prompt,
                 prompt=editing_config['editing_prompts'][0],
                 cross_replace_steps=p2p_cfg.get('cross_replace_steps'),
                 self_replace_steps=p2p_cfg.get('self_replace_steps', 0.0),
-                blend_latents=p2p_cfg.get('blend_latents', False),
+                blend_latents=_blender_on and p2p_cfg.get('blend_latents', False),
                 latent_replace_steps=p2p_cfg.get('latent_replace_steps', (0.2, 0.8)),
             )
             batch['ddim_init_latents'] = pipeline.prepare_latents_ddim_inverted(
@@ -922,38 +1000,56 @@ def test(
             )
             print(f"[TIMING] rank={accelerator.process_index} use_time_Denoising={time.time()-_t_den0:.4f}", flush=True)
 
+        if elve_timing.ENABLED:
+            # ELVE_TIMING=1：通信/换入换出分桶报告（两 rank 各打一份并落 json）
+            print(elve_timing.format_report(f'rank={accelerator.process_index}'), flush=True)
+            elve_timing.dump(os.path.join(logdir, f'elve_timing_rank{accelerator.process_index}.json'))
+
     if torch.cuda.device_count() > 1:
         dist.barrier()
         rank = dist.get_rank()
         if rank == 0:
-            gif1 = Image.open(f"{logdir}/sample/step_0_GPU0.gif")
-            gif2 = Image.open(f"{logdir}/sample/step_0_GPU1.gif")
-            
-            frames1 = []
-            frames2 = []
-            try:
-                while True:
-                    frames1.append(gif1.copy())
-                    gif1.seek(len(frames1))
-            except EOFError:
-                pass
-            try:
-                while True:
-                    frames2.append(gif2.copy())
-                    gif2.seek(len(frames2))
-            except EOFError:
-                pass
+            # 按实际存在的 step_0_GPU{r}.gif 合并（不写死 GPU0/GPU1，卡数自适应；
+            # 正则排除 atten 可视化文件），rank 序号排序保证帧顺序与视频一致
+            per_gpu = []
+            for p in glob(f"{logdir}/sample/step_0_GPU*.gif"):
+                m = re.search(r'GPU(\d+)\.gif$', p)
+                if m:
+                    per_gpu.append((int(m.group(1)), p))
+            per_gpu.sort()
 
-            combined_frames = frames1 + frames2
-            output_path = f"{logdir}/sample/step1.gif"
-            combined_frames[0].save(
-                output_path,
-                save_all=True,
-                append_images=combined_frames[1:],
-                loop=0,
-                duration=gif1.info['duration']
-            )
-    
+            combined_frames = []
+            duration = 100
+            for _, p in per_gpu:
+                gif = Image.open(p)
+                n = 0
+                try:
+                    while True:
+                        combined_frames.append(gif.copy())
+                        n += 1
+                        gif.seek(n)
+                except EOFError:
+                    pass
+                duration = gif.info.get('duration', duration)
+
+            if not combined_frames:
+                print(f"[ELVE] 未找到任何 step_0_GPU*.gif，跳过 step1.gif 拼接: {logdir}/sample")
+            else:
+                output_path = f"{logdir}/sample/step1.gif"
+                combined_frames[0].save(
+                    output_path,
+                    save_all=True,
+                    append_images=combined_frames[1:],
+                    loop=0,
+                    duration=duration
+                )
+            # step1.gif 是"原视频|编辑后"网格的逐卡顺序拼接；再出一份纯编辑帧版
+            _save_edited_only_gif(logdir)
+    else:
+        # 单卡：logger 的 step_0_0_0_GPU0.gif 本身就是纯编辑帧，统一换名成
+        # step1_edited.gif，保证单双卡产物命名一致
+        _save_edited_only_gif(logdir)
+
     accelerator.end_training()
 
 @click.command()

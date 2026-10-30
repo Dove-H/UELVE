@@ -37,6 +37,7 @@ from video_diffusion.prompt_attention import fatezero_register
 from video_diffusion.prompt_attention.fatezero_store import InversionStore, ReplayProvider
 from video_diffusion.prompt_attention.fatezero_util import (
     EmptyControl, compute_need_steps, make_controller)
+from video_diffusion.elve_timing import timer
 
 logger = logging.get_logger(__name__)
 
@@ -78,6 +79,10 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         self.num_inference_steps = num_inference_steps
         self.empty_controller = EmptyControl()
 
+        # alt 滑动分组的开关必须按全局帧数判断：若按每卡帧数，"每卡帧数恰好等于
+        # 网格大小"的配置（如 8f 双卡、grid 2×2 → 每卡 4 帧）会被关掉混帧，
+        # 而同配置单卡是开的 → 单双卡编辑结果不一致（帧 3/4 之间永远无 attention 交流）
+        self._video_length_total = video_length
         self.video_length = video_length // torch.cuda.device_count()  # 每卡帧数（真实，未补齐）
         GPU_num = torch.cuda.device_count()
         base = os.path.basename(data_path.rstrip('/')) if data_path else 'unknown'
@@ -127,11 +132,15 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
             data1 = torch.zeros_like(data)
             latents = latents[:, :, self.grid_sizeH:, :, :]
             if rank == 0:
-                dist.send(data, dst=1)
-                dist.recv(data1, src=1)
+                with timer('comm_send'):
+                    dist.send(data, dst=1)
+                with timer('comm_recv'):
+                    dist.recv(data1, src=1)
             else:
-                dist.recv(data1, src=0)
-                dist.send(data, dst=0)
+                with timer('comm_recv'):
+                    dist.recv(data1, src=0)
+                with timer('comm_send'):
+                    dist.send(data, dst=0)
             latents = torch.cat([latents, data1], dim=2).to(device)
             latents = grid.combine_frames_in_grid(latents, self.grid_sizeH, self.grid_sizeW)
         else:
@@ -143,23 +152,33 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
             data1 = torch.zeros_like(data)
             latents = latents[:, :, :-self.grid_sizeH, :, :]
             if rank == 0:
-                dist.send(data, dst=1)
-                dist.recv(data1, src=1)
+                with timer('comm_send'):
+                    dist.send(data, dst=1)
+                with timer('comm_recv'):
+                    dist.recv(data1, src=1)
             else:
-                dist.recv(data1, src=0)
-                dist.send(data, dst=0)
+                with timer('comm_recv'):
+                    dist.recv(data1, src=0)
+                with timer('comm_send'):
+                    dist.send(data, dst=0)
             latents = torch.cat([data1, latents], dim=2).to(device)
             latents = grid.combine_frames_in_grid(latents, self.grid_sizeH, self.grid_sizeW)
-        dist.barrier()
+        with timer('comm_barrier'):
+            dist.barrier()
         return latents, indicate
 
     def _want_alt(self, step: int) -> bool:
-        """反演步 step 的分组是否为滑动分组（indicate(step)，偶数步滑动）。"""
-        return (self.video_length > self.grid_sizeH * self.grid_sizeW) and (step % 2 == 0)
+        """反演步 step 的分组是否为滑动分组（indicate(step)，偶数步滑动）。
+
+        按全局帧数判断（见 __init__ 注释）：双卡每卡帧数==网格大小时也要开，
+        由 alternate_multiGPU 跨卡交换帧来复刻单卡的滑动分组。"""
+        return (self._video_length_total > self.grid_sizeH * self.grid_sizeW) and (step % 2 == 0)
 
     def _group_shuffle(self, latents, flag):
         if torch.cuda.device_count() > 1:
-            return self.alternate_multiGPU(latents, flag)
+            # comm_exchange_total 含张量切片/cat 等准备开销，网络环节见 comm_send/recv/barrier
+            with timer('comm_exchange_total'):
+                return self.alternate_multiGPU(latents, flag)
         return self.alternate(latents, flag)
 
     @staticmethod
@@ -242,11 +261,12 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
                                   editing_params.get('blend_latents', False),
                                   self.tokenizer,
                                   latent_replace_steps=latent_replace_steps)
-        # meta 含 blend 窗口：改窗口即换缓存
+        # meta 含 blend 窗口：改窗口即换缓存；alt 滑动分组影响分片帧构成，一并入 meta
         meta = dict(source_prompt=prompts[0], num_steps=num_inference_steps,
                     num_grids=num_grids, video_length=n_real,
                     gridH=self.grid_sizeH, gridW=self.grid_sizeW,
-                    latent_replace_steps=latent_replace_steps)
+                    latent_replace_steps=latent_replace_steps,
+                    alt_sliding=self._want_alt(0))
         self._latent_replace_steps = latent_replace_steps
         self._need = need
         self._num_grids = num_grids
@@ -254,7 +274,7 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
 
         keep_on_gpu = self.video_length <= self.memory_frames
         print(f'[FateZero] 帧数(含补齐)={self.video_length} memory_frames={self.memory_frames} '
-              f'→ 特征{"驻留GPU" if keep_on_gpu else "落盘+异步预取"}')
+              f'→ 特征{"驻留GPU" if keep_on_gpu else "异步落盘+编辑期预取"}')
 
         if (not self.All_Inversion) and InversionStore.cache_valid(self.store_dir, meta, need):
             print(f'[FateZero] 缓存命中，跳过反演: {self.store_dir}')

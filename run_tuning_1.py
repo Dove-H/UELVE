@@ -29,6 +29,13 @@ import grid
 check_min_version("0.10.0.dev0")
 logger = get_logger(__name__, log_level="INFO")
 
+# 分块梯度累积：单卡且 n_sample_frames >= ACCUM_ABOVE_FRAMES（含 200f 本身）时，
+# 训练步内按网格图切片逐块 forward+backward（梯度累积），激活峰值只与块大小相关，
+# 避免 200f+ 单卡一次性为全部网格图建计算图导致 OOM；多卡/多进程路径不受影响。
+# 块大小可用 ELVE_TUNE_ACCUM_GRIDS 覆盖（每格 = grid_sizeH*grid_sizeW 帧）。
+ACCUM_ABOVE_FRAMES = 200
+ACCUM_CHUNK_GRIDS = max(1, int(os.environ.get("ELVE_TUNE_ACCUM_GRIDS", "16") or 16))
+
 
 def main(
     pretrained_model_path: str,
@@ -171,8 +178,14 @@ def main(
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
-    if gradient_checkpointing:
+    # 单卡定制：gradient_checkpointing 启用阈值从 >16f 降到 >8f（yaml 里 16f 及以下为
+    # false）；双卡仍走 yaml 原值，多卡路径不受影响
+    if gradient_checkpointing or (
+        torch.cuda.device_count() == 1 and n_sample_frames > 8
+    ):
         unet.enable_gradient_checkpointing()
+        print("gradient_checkpointing: on"
+              + (" (单卡>8f 自动启用)" if not gradient_checkpointing else " (yaml)"))
 
     if scale_lr:
         learning_rate = (
@@ -381,13 +394,31 @@ def main(
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.prediction_type}")
                 # Predict the noise residual and compute loss
-                model_pred = process_with_unet(unet, noisy_latents, timesteps, encoder_hidden_states)
-                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                # 单卡 & >=ACCUM_ABOVE_FRAMES：按网格图切片逐块 forward+backward 累积梯度，
+                # 单块计算图随 backward 释放（激活峰值只与块大小相关）；块权重 = 块内格数/总格数，
+                # 累积梯度与全帧一次 mean loss 严格等价
+                n_grids_total = noisy_latents.shape[2]
+                if (torch.cuda.device_count() == 1
+                        and n_sample_frames >= ACCUM_ABOVE_FRAMES):
+                    loss = None
+                    for s in range(0, n_grids_total, ACCUM_CHUNK_GRIDS):
+                        g_pred = process_with_unet(
+                            unet, noisy_latents[:, :, s:s + ACCUM_CHUNK_GRIDS],
+                            timesteps, encoder_hidden_states)
+                        g_loss = F.mse_loss(
+                            g_pred.float(), target[:, :, s:s + ACCUM_CHUNK_GRIDS].float(),
+                            reduction="mean")
+                        w = g_pred.shape[2] / n_grids_total
+                        accelerator.backward(g_loss * w)
+                        loss = (g_loss * w).detach() if loss is None else loss + (g_loss * w).detach()
+                else:
+                    model_pred = process_with_unet(unet, noisy_latents, timesteps, encoder_hidden_states)
+                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                    # Backpropagate
+                    accelerator.backward(loss)
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(train_batch_size)).mean()
                 train_loss += avg_loss.item() / gradient_accumulation_steps
-                # Backpropagate
-                accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(unet.parameters(), max_grad_norm)
                 optimizer.step()

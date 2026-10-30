@@ -33,16 +33,14 @@ PROMPT_PRINCIPLES = """\
 
 ## Editing Type Classification Standard
 
-Task types (choose exactly one):
-  attribute_change      — color, material, texture of named subjects
-  object_replacement    — a subject is replaced by a different object category
-  style_transfer        — global style change of the whole scene
-  background_change     — the scene behind the subjects is replaced or re-rendered
-  motion_change         — pose or motion of a subject changes with a motion guidance signal map
-
 Editing scope:
   Local Editing  — the edit is confined to specific subjects/regions of the frames
-  Global Editing — the edit applies scene-wide (style, season, time-of-day, domain)
+  Global Editing — the edit applies scene-wide 
+
+Editing types:
+  Simple editing -  the contour change is small AND the edited object is static.
+  Complex editing - the contour change is large, OR the edited object is in motion.
+  Motion editing -  only the filename of a motion guidance map is attached to the target prompt.
 
 ## Decision rules
 
@@ -53,30 +51,31 @@ D1. Mask necessity: a mask is needed if the edit is LOCAL, i.e. the
 D2. Fine-tuning necessity (temporal module): focus on TWO criteria:
     (a) LARGE structural change — the contour or structure of the edited object
         differs greatly between source and target (e.g., "a man is cutting a
-        watermelon" -> "a man is cutting a pizza": their shapes differ greatly);
-    (b) Moving object — the edited/replaced object is in motion, so the new
-        content must produce coherent motion across video frames (e.g., "a dog
+        watermelon" -> "a man is cutting a pear": their shapes differ greatly);
+    (b) Moving object — the edited/replaced object is in motion (e.g., "a dog
         is running on the grass" -> "a cat is running on the grass").
     If NEITHER holds — the contour barely changes AND the object is static —
     zero-shot attention manipulation is sufficient and no fine-tuning is needed
-    (e.g., "a dog is eating pizza" -> "a cat is eating pizza": the contour
-    difference is small and the subjects are static).
+    (e.g., "a apple on the table" -> "a pear on the table": the contour difference is small and the edited
+    objects are static).
+    To judge whether the contour change is large or small, compare the overall
+    silhouettes of the source and target objects: two similar-sized animals of
+    the same kind, or two objects of the same shape family (round fruits, cups
+    and mugs, boxes, balls), have similar contours; pairs with clearly different
+    proportions (tall vs stout, thin vs bulky, flat vs voluminous) or of different
+    shape families have a LARGE contour difference. An structure change that
+    visibly alters the silhouette (e.g., adding a wing, a canopy, a cargo box, a
+    large hairstyle change; opening a convertible top) also counts as a LARGE
+    structural change, while attribute changes that keep the contour (color,
+    material, pattern) do not.
+   
 
-D3. Global style transfer / change of the whole scene:
-    Global Editing, no mask, zero-shot, no fine-tuning.
-
-D4. Motion editing recognition: judge not only whether the action/motion of the
+D3. Motion editing recognition: judge not only whether the action/motion of the
     subject is changed in the prompts, but ALSO whether the target prompt ends
-    with one of these two motion signals:
-      (a) a motion guidance signal map filename, e.g. "(dance_pose_map_03.gif)";
-      (b) a MotionEditor case tag — a parenthesized "case-<name>" such as
-          "（case-1）" — which names the MotionEditor project whose reference
-          motion re-drives the subject.
+    with  motion signals: a MotionEditor case tag — a parenthesized "case-<name>" such as
+      (e.g., "a girl is dancing" -> "a girl is dancing(case-1)"     .
     If any holds, it is motion editing: Local Editing, no mask, fine-tune the
-    Motion module (one-shot). Note that for motion editing the source and target
-    prompts may be word-for-word identical ("a girl is dancing" -> "a girl is
-    dancing（case-1）"): the ONLY difference is the appended case tag, and that
-    tag alone is a sufficient and decisive motion-editing signal.
+    Motion module (one-shot). 
 """
 
 # ============================================================
@@ -85,35 +84,54 @@ D4. Motion editing recognition: judge not only whether the action/motion of the
 PROMPT_EXAMPLES = """\
 ## few-shot Examples
 
-Example 1 — object replacement (local, one-shot)
+Example 1 — global editing / simple editing
+Input:
+SOURCE_PROMPT: a street with cars and pedestrians
+TARGET_PROMPT: a street with cars and pedestrians in watercolor painting style
+Output:
+{"model_adaption": 'no-mask, zero-shot',
+ "Thinking":
+ '1.Prompt comparison analysis:
+      The difference between source and target prompts is that the rendering style of the whole scene 
+      changes to watercolor painting style.
+  2.Editing type:
+      The style of the entire scene changes while layout and content stay, which
+      belongs to the editing type: Global Editing (style transfer).
+  3.Mask mechanism:
+      A mask would incorrectly freeze part of the scene, so no mask mechanism is
+      needed here.
+  4.Fine-tuning:
+      Style transfer(global editing) does not modify object geometry, so zero-shot is sufficient and no fine-tuning is needed.'}
+
+Example 2 —  local editing / complex editing(obvious structural change)
 Input:
 SOURCE_PROMPT: a man is cutting a watermelon on the table
-TARGET_PROMPT: a man is cutting a pizza on the table
+TARGET_PROMPT: a man is cutting a pear on the table
 Output:
-{"model_adaption": 'mask(FastSAM), one-shot(temporal module)',
+{"model_adaption": 'mask, one-shot(temporal module)',
  "Thinking":
  '1.Prompt comparison analysis:
       The difference between source and target prompts is: the subject "watermelon"
-      is replaced with "pizza".
+      is replaced with "pear".
   2.Editing type:
       The change of subject in prompts involves an object replacement in the spatial
       domain of video frames, which belongs to the editing type: Local Editing.
   3.Mask mechanism:
       Therefore, we need a mask mechanism to segment the areas that are originally
       occupied by "watermelon" in the source frames and then generate the new object
-      "pizza" there. We select off-the-shelf FastSAM to do it.
+      "pear" there. 
   4.Fine-tuning:
-      Since the shape change between "watermelon" and "pizza" may be significant,
-      which involves structure modification, we'd also like to add a temporal module
+      Since the shape change between "watermelon" and "pear" may be significant,
+      which involves structure modification, we also like to add a temporal module
       to the base model and fine-tune it to smooth the complex changes across video
       frames.'}
 
-Example 2 — attribute change (local, zero-shot)
+Example 3 — local editing / complex editing(object in motion)
 Input:
 SOURCE_PROMPT: a man in a red jacket is riding a bicycle on a forest road
 TARGET_PROMPT: a man in a blue jacket is riding a bicycle on a forest road
 Output:
-{"model_adaption": 'mask(FastSAM), zero-shot',
+{"model_adaption": 'mask , one-shot(temporal module)',
  "Thinking":
  '1.Prompt comparison analysis:
       The difference between source and target prompts is: the attribute "red" of the
@@ -124,60 +142,63 @@ Output:
   3.Mask mechanism:
       Therefore, we need a mask mechanism to segment the areas originally occupied by
       the "jacket" and re-generate it in blue there, keeping the man, bicycle and
-      forest background unchanged. We select off-the-shelf FastSAM to do it.
+      forest background unchanged. 
   4.Fine-tuning:
-      Since a color change does not alter the object geometry, zero-shot is sufficient and no fine-tuning is needed.'}
+      Since the man is in motion, fine-tuning is needed.'}
 
-Example 3 — global style transfer (no mask, zero-shot)
+Example 4 — local editing / simple editing(object is static and the contour change is small)
 Input:
-SOURCE_PROMPT: a realistic city street with cars and pedestrians
-TARGET_PROMPT: an anime-style city street with cars and pedestrians
+SOURCE_PROMPT: a peach sits on the kitchen scale
+TARGET_PROMPT: a apple sits on the kitchen scale
 Output:
-{"model_adaption": 'no-mask, zero-shot',
+{"model_adaption": 'mask , zero-shot',
  "Thinking":
  '1.Prompt comparison analysis:
-      The difference between source and target prompts is: the rendering style of the
-      whole scene changes from "realistic" to "anime-style".
+      The difference between source and target prompts is: the object "peach" is replaced with "apple".
   2.Editing type:
-      The style of the entire scene changes while layout and content stay, which
-      belongs to the editing type: Global Editing (style transfer).
+      The object "peach" is replaced with "apple" while the scene layout stays, which
+      belongs to the editing type: Local Editing (object replacement).
   3.Mask mechanism:
-      A mask would incorrectly freeze part of the scene, so no mask mechanism is
-      needed here.
+        Therefore, we need a mask mechanism to segment the areas originally occupied by
+        the "peach" and re-generate it as "apple" there, keeping the scale and background
+        unchanged. 
   4.Fine-tuning:
-      Style transfer does not modify object geometry, so zero-shot is sufficient and no fine-tuning is needed.'}
+      Since the fruit sits still on the scale and the shape difference between "peach"
+      and "apple" is small, zero-shot attention manipulation is sufficient and no
+      fine-tuning is needed.'}
 
-Example 4 — motion editing (no mask, one-shot Motion module)
+Example 5 — local editing / simple editing(static subject, similar contour)
 Input:
-SOURCE_PROMPT: a girl is dancing
-TARGET_PROMPT: a girl is dancing (dance_pose_map_03.gif)
+SOURCE_PROMPT: a dog is standing beside the wooden fence
+TARGET_PROMPT: a wolf is standing beside the wooden fence
 Output:
-{"model_adaption": 'no-mask, one-shot(Motion module)',
+{"model_adaption": 'mask , zero-shot',
  "Thinking":
  '1.Prompt comparison analysis:
-      There are no difference between source and target prompts. Moreover, the target prompt ends
-      with a motion guidance signal map filename "dance_pose_map_03.gif".
+      The difference between source and target prompts is: the subject "dog"
+      is replaced with "wolf".
   2.Editing type:
-      a motion guidance signal map is attached to the target prompt, which belongs to the editing
-      type: Motion Editing.
+      The subject is replaced while the scene layout stays, which belongs to the
+      editing type: Local Editing (object replacement).
   3.Mask mechanism:
-      Motion editing does not need a mask mechanism; the motion of the subject is
-      driven directly by the motion guidance signal map provided by the user.
+      Therefore, we need a mask mechanism to segment the areas originally occupied
+      by the "dog" and generate the "wolf" there, keeping the fence and
+      background unchanged.
   4.Fine-tuning:
-      Since changing the motion involves large structural (pose) changes of the
-      subject across video frames, we need to invoke the motion editing module and
-      fine-tune it on the motion guidance signal map, i.e. one-shot (Motion module).'}
+      Unlike change giraffe to pig, whose body proportions differ greatly. a dog and a wolf are similar with almost identical
+      overall contours. The contour change is small AND the edited animal is static, so BOTH conditions hold simultaneously and zero-shot attention manipulation is
+      sufficient and no fine-tuning is needed.'}
 
-Example 5 — motion editing via MotionEditor case tag (no mask, one-shot Motion module)
+Example 6 — motion editing via MotionEditor case tag (no mask, one-shot Motion module)
 Input:
 SOURCE_PROMPT: a girl is dancing
-TARGET_PROMPT: a girl is dancing（case-1）
+TARGET_PROMPT: a girl is dancing (case-1)
 Output:
 {"model_adaption": 'no-mask, one-shot(Motion module)',
  "Thinking":
  '1.Prompt comparison analysis:
       The source and target prompts are word-for-word identical, but the target
-      prompt ends with a MotionEditor case tag "（case-1）".
+      prompt ends with a MotionEditor case tag "(case-1)".
   2.Editing type:
       The case tag indicates that the motion of the subject is re-driven by the
       reference motion of the MotionEditor case, which belongs to the editing
@@ -194,13 +215,12 @@ Output:
 PROMPT_OUTPUT_SPEC = """\
 ## Output format
 Return exactly ONE Python-dict-style object and nothing else.
-IMPORTANT: output the "model_adaption" key FIRST, before the "Thinking" key —
-the downstream pipeline reads "model_adaption" from the stream before "Thinking"
-is fully generated, so its value must appear at the very beginning of the object.
-Do NOT use any apostrophes (') inside the "Thinking" string — write full words
+IMPORTANT: output the "model_adaption" key FIRST, before the "Thinking" key — the downstream pipeline reads "model_adaption" 
+from the stream before "Thinking" is fully generated, so its value must appear at the very beginning of the object. Do NOT 
+use any apostrophes (') inside the "Thinking" string — write full words
 (e.g. "we would" instead of "we'd"), because an apostrophe breaks the dict syntax.
 {
-  "model_adaption": '<ALWAYS two comma-separated parts: the mask decision ("mask(FastSAM)" or "no-mask") followed by the paradigm ("zero-shot" or "one-shot(temporal module)" or "one-shot(Motion module)"). e.g. mask(FastSAM), one-shot(temporal module)>',
+  "model_adaption": '<ALWAYS two comma-separated parts: the mask decision ("mask " or "no-mask") followed by the paradigm ("zero-shot" or "one-shot(temporal module)" or "one-shot(Motion module)"). e.g. mask , one-shot(temporal module)>',
   "Thinking":
   '1.Prompt comparison analysis: <Semantic analysis of what differs between the source and target prompts>
   2.Editing type: <classify the editing operation>

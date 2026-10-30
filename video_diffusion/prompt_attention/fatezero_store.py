@@ -7,8 +7,9 @@ FateZero 模式（重构版）注意力 / latent 存储与重放数据源。
 1. 分片粒度为 (inversion_step, grid)：反演期 UNet 逐网格调用，每次调用产生的
    ≤1024 token 的 attention map 归入一个独立分片；编辑期按同样的 (step, grid) 顺序消费，
    天然支持"算当前网格时预取下一个网格"的异步双缓冲。
-2. 显存分级：单卡帧数 ≤ 阈值（memory_frames）时特征全部驻留 GPU；超过则即时落盘，
-   编辑期由后台线程按消费顺序预取（I/O 与计算 overlap）。
+2. 显存分级：单卡帧数 ≤ 阈值（memory_frames）时特征全部驻留 GPU；超过则分级落盘。
+   两侧 I/O 均与计算重叠：反演期主线程只做 D2H、torch.save 交后台写线程（有界队列
+   背压）；编辑期由后台线程按消费顺序预取（I/O 与计算 overlap）。
 3. 数据裁剪（修正原版 FateZero 存储的浪费）：
    - cross 只存编辑期会消费的步（cross_replace_alpha>0 ∪ self 重放窗口 ∪ latent blend 窗口）
    - self 只存 self_replace 窗口配对的反演步（编辑步 i ↔ 反演步 N-1-i）
@@ -21,9 +22,22 @@ FateZero 模式（重构版）注意力 / latent 存储与重放数据源。
 import json
 import os
 import threading
+import time
 from queue import Queue
 
 import torch
+
+from .. import elve_timing
+from ..elve_timing import timer, add, add_bytes
+
+
+def _payload_bytes(payload):
+    """读取侧数据量：分片 dict 按 tensor 逐个累计，latent 为单 tensor。"""
+    if isinstance(payload, dict):
+        return sum(t.numel() * t.element_size() for v in payload.values() for t in v)
+    if torch.is_tensor(payload):
+        return payload.numel() * payload.element_size()
+    return 0
 
 ATTN_MAX_TOKENS = 32 ** 2  # 与原版一致：只记录 ≤1024 token 的层（更大层走 xformers，两侧对称跳过）
 
@@ -97,6 +111,15 @@ class InversionStore(AttentionControl):
         self._mark = {}
         self._layers_per_call = {}                     # key -> 每次 UNet 调用的层数（一致性校验）
         self._cur_step = 0
+        # 异步落盘（与编辑期 ReplayProvider 预取对称）：主线程只做 D2H 拷贝，
+        # torch.save 交后台写线程，与下一网格/时间步的 UNet 计算重叠。
+        # 有界队列即背压：排队 CPU 张量 ≤ 4 个分片，RAM 增量有界。
+        self._write_queue = None
+        self._write_error = []
+        if not keep_on_gpu:
+            self._write_queue = Queue(maxsize=4)
+            self._write_thread = threading.Thread(target=self._write_worker, daemon=True)
+            self._write_thread.start()
 
     # ---------------- 反演循环驱动接口（由 pipeline 调用） ----------------
 
@@ -142,15 +165,26 @@ class InversionStore(AttentionControl):
                 self.latents[step] = x_t.detach()
             else:
                 os.makedirs(self.store_dir, exist_ok=True)
-                torch.save(x_t.detach().cpu(), os.path.join(self.store_dir, f'lat{step:03d}.pt'))
+                path = os.path.join(self.store_dir, f'lat{step:03d}.pt')
+                with timer('store_d2h'):
+                    lat = x_t.detach().cpu()
+                with timer('store_write_latent'):
+                    torch.save(lat, path)
+                add_bytes('store_write_latent', os.path.getsize(path))
         return x_t
 
     def finish(self, init_latent):
-        """反演结束：记录最终 latent 并写 manifest（缓存复用凭据）。"""
+        """反演结束：等后台写线程排空后再写 init.pt/manifest（manifest 最后落盘，
+        中途崩溃不会留下看似完整的缓存）。"""
         self.init_latent = init_latent.detach()
         if not self.keep_on_gpu:
+            self._write_queue.put(None)
+            self._write_thread.join()
+            if self._write_error:
+                raise RuntimeError(f'反演分片异步落盘失败: {self._write_error[0]}')
             os.makedirs(self.store_dir, exist_ok=True)
-            torch.save(self.init_latent.cpu(), os.path.join(self.store_dir, 'init.pt'))
+            with timer('store_write_init'):
+                torch.save(self.init_latent.cpu(), os.path.join(self.store_dir, 'init.pt'))
             self._save_manifest()
 
     # ---------------- controller 接口：反演期逐层记录 ----------------
@@ -166,9 +200,28 @@ class InversionStore(AttentionControl):
     # ---------------- 磁盘布局：分片 step{S}_grid{J}.pt / latent lat{S}.pt / init.pt / manifest.json ----------------
 
     def _save_shard(self, step, grid, shard):
+        path = os.path.join(self.store_dir, f'step{step:03d}_grid{grid:02d}.pt')
+        with timer('store_d2h'):
+            payload = {k: [t.cpu() for t in v] for k, v in shard.items()}
+        # 落盘交后台写线程（队满阻塞=背压，等待时间记 store_write_backpressure）
+        with timer('store_write_backpressure'):
+            self._write_queue.put((path, payload))
+
+    def _write_worker(self):
         os.makedirs(self.store_dir, exist_ok=True)
-        torch.save({k: [t.cpu() for t in v] for k, v in shard.items()},
-                   os.path.join(self.store_dir, f'step{step:03d}_grid{grid:02d}.pt'))
+        while True:
+            item = self._write_queue.get()
+            if item is None:
+                return
+            if self._write_error:
+                continue  # 已出错：只排空队列防主线程卡死，错误在 finish 汇总抛出
+            path, payload = item
+            try:
+                with timer('store_write_shard'):
+                    torch.save(payload, path)
+                add_bytes('store_write_shard', os.path.getsize(path))
+            except Exception as e:  # 磁盘满等 IO 错误统一延迟到 finish 抛出
+                self._write_error.append(e)
 
     def _save_manifest(self):
         need = {k: (sorted(v) if v is not None else None) for k, v in self.need.items()}
@@ -256,16 +309,24 @@ class ReplayProvider:
         for item in self.order:
             kind = item[0]
             if kind == 'shard':
-                payload = self.load_shard(item[1], item[2])
+                with timer('store_read_shard'):
+                    payload = self.load_shard(item[1], item[2])
+                add_bytes('store_read_shard', _payload_bytes(payload))
             else:
-                payload = self.load_latent(item[1])
+                with timer('store_read_latent'):
+                    payload = self.load_latent(item[1])
+                add_bytes('store_read_latent', _payload_bytes(payload))
             self._queue.put((item, payload))
         self._queue.put(None)
 
     def _next(self):
+        _t0 = time.perf_counter() if elve_timing.ENABLED else None
         item = self._queue.get()
         if item is None:
             raise RuntimeError('[ReplayProvider] 预取序列耗尽，消费超出预期')
+        if _t0 is not None:
+            # 主线程取数等待：预取未跟上时才显著（被计算掩盖的部分趋近 0）
+            add('store_wait_main', time.perf_counter() - _t0)
         expected = next(self._expected, None)
         assert item[0] == expected, f"[ReplayProvider] 消费乱序: got {item[0]}, expect {expected}"
         return item
@@ -275,14 +336,16 @@ class ReplayProvider:
         item, payload = self._next()
         assert item == ('shard', step, grid), f"[ReplayProvider] 分片错位: got {item}, want {(step, grid)}"
         if isinstance(payload, dict):
-            payload = {k: [t.to(self.device, self.dtype) for t in v] for k, v in payload.items()}
+            with timer('store_h2d'):
+                payload = {k: [t.to(self.device, self.dtype) for t in v] for k, v in payload.items()}
         return payload
 
     def get_latent(self, step: int):
         item, payload = self._next()
         assert item == ('latent', step), f"[ReplayProvider] latent 错位: got {item}, want {('latent', step)}"
         if torch.is_tensor(payload):
-            payload = payload.to(self.device, self.dtype)
+            with timer('store_h2d'):
+                payload = payload.to(self.device, self.dtype)
         return payload
 
     def has_shard(self, step: int) -> bool:
