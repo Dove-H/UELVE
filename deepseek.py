@@ -236,9 +236,9 @@ SYSTEM_PROMPT = "\n\n".join(
 # user 消息模板：实际编辑任务描述通过这里传入
 USER_PROMPT_TEMPLATE = "SOURCE_PROMPT: {source_prompt}\nTARGET_PROMPT: {target_prompt}"
 
-# API key 优先读环境变量 DEEPSEEK_API_KEY（避免硬编码泄露）
+# API key 只从环境变量 DEEPSEEK_API_KEY 读取（export DEEPSEEK_API_KEY=sk-xxx）
 client = OpenAI(
-    api_key=os.environ.get("DEEPSEEK_API_KEY", "REDACTED-DEEPSEEK-API-KEY"),
+    api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
     base_url="https://api.deepseek.com",
 )
 
