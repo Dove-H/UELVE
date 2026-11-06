@@ -236,11 +236,16 @@ SYSTEM_PROMPT = "\n\n".join(
 # user 消息模板：实际编辑任务描述通过这里传入
 USER_PROMPT_TEMPLATE = "SOURCE_PROMPT: {source_prompt}\nTARGET_PROMPT: {target_prompt}"
 
-# API key 只从环境变量 DEEPSEEK_API_KEY 读取（export DEEPSEEK_API_KEY=sk-xxx）
-client = OpenAI(
-    api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
-    base_url="https://api.deepseek.com",
-)
+# API key 只从环境变量 DEEPSEEK_API_KEY 读取（已配置在 ~/.bashrc；勿硬编码进代码/仓库）
+def _get_client():
+    """按需创建 client；缺 key 时立刻给出明确指引，避免调用阶段才爆晦涩的 401。"""
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        raise SystemExit(
+            "[DeepSeek] 未检测到 DEEPSEEK_API_KEY 环境变量（Use_DeepSeek=True 时必需）。\n"
+            "  解决：在运行终端执行 export DEEPSEEK_API_KEY=sk-xxx，或 source ~/.bashrc 后重试；\n"
+            "  VSCode/IDE 内启动的终端需要重开才会继承新配置。")
+    return OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
 
 def LLM(source_prompt, target_prompt):
@@ -250,7 +255,7 @@ def LLM(source_prompt, target_prompt):
         source_prompt=source_prompt, target_prompt=target_prompt
     )
 
-    response = client.chat.completions.create(
+    response = _get_client().chat.completions.create(
         model="deepseek-chat",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -294,7 +299,7 @@ def LLM_stream(source_prompt, target_prompt):
     )
 
     t0 = time.perf_counter()
-    stream = client.chat.completions.create(
+    stream = _get_client().chat.completions.create(
         model="deepseek-chat",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},

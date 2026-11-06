@@ -458,7 +458,8 @@ def llm_decision_routing(Omegadict, config):
         t0 = time.time()
         while True:
             d = _read_llm_decision(config)
-            if d and d.get("written_at", 0) >= t_accept:
+            # paradigm 缺失视为不完整块（rank0 正在写/手删残留），paradigm 保持 None 继续轮询
+            if d and d.get("written_at", 0) >= t_accept and d.get("paradigm"):
                 paradigm = d["paradigm"]
                 adaption = d.get("adaption", "")
                 break
