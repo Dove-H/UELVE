@@ -482,7 +482,19 @@ def llm_decision_routing(Omegadict, config):
         # 16f 单卡在去噪第一步即 OOM（实测已分配 22.55GiB）；降为分级存储：
         # 单卡帧数 >8 落盘 + 预取，mask 模式仍保持全驻留（memory_frames=16）
         overrides["memory_frames"] = 8
-        print("[ELVE] no-mask(全局编辑)：memory_frames=8（特征分级存储，单卡超 8 帧落盘）")
+        # DeepSeek 判 no-mask 时禁用 mask 机制：把各 p2p_config 条目的 blend_words
+        # 覆盖为默认值 None（等效于在 yaml 里注释掉该行）——make_controller 里
+        # blend_words=None 不建 SpatialBlender，latent/self-attention blend 整体旁路，
+        # 反演期 need 镜像按同一开关降级（test() 的 _blender_on），预取不失配。
+        # DeepSeek 判 mask、或 Use_DeepSeek=False、或 ELVE_FORCE_PARADIGM 跳过
+        # DeepSeek 时，本分支不进入，blend_words 严格按 yaml 原值执行。
+        p2p_entries = Omegadict.get("editing_config", {}).get("p2p_config", None) or {}
+        if hasattr(p2p_entries, "keys") and len(p2p_entries):
+            overrides["editing_config"] = {
+                "p2p_config": {k: {"blend_words": None} for k in p2p_entries}
+            }
+        print("[ELVE] no-mask(全局编辑)：memory_frames=8（特征分级存储，单卡超 8 帧落盘）；"
+              "blend_words 置 None 禁用 mask 机制（yaml 原值不生效，等效注释）")
     if paradigm == "temporal":
         # 阶段2：先自主跑 tune，再加载 tune 后的模型文件（本阶段固定走 FateZero 模式）
         overrides["method"] = "FateZero"
