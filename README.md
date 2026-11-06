@@ -55,10 +55,8 @@ pip install -r requirements.txt
 > export DEEPSEEK_API_KEY=sk-xxx
 > ```
 
->**Basic image contrl strategy, set the `Method` in config yaml: FateZero for Attention mode and ControlNet for ControlNet mode
+>**Basic image contrl strategy**： set the `Method` in config yaml: FateZero for Attention mode and ControlNet for ControlNet mode
 
->**RUN in Single-GPU**: CUDA_VISIBLE_DEVICES=1  python   test_fatezero.py --config config/edit/wolf8f.yaml
->**RUN in Multi-GPU** : CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 test_fatezero.py --config config/edit/wolf8f.yaml
 
 
 ### 2. Run
@@ -69,6 +67,7 @@ config to your local [Stable Diffusion v1.5](https://huggingface.co/runwayml/sta
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python test_fatezero.py --config config/edit/wolf8f.yaml
+CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 test_fatezero.py --config config/edit/wolf8f.yaml
 ```
 
 ## 📊 Main Results
