@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+  <title>UELVE: LLM-Driven Unified Framework with Grid Diffusion for Efficient Long Video Editing</title>
+  <!-- 全部资源本地化:无任何外部 CDN 依赖,国内访问不受影响 -->
+  <link rel="stylesheet" href="./static/css/bulma.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="./static/css/fontawesome.all.min.css">
+  <link rel="stylesheet" href="./static/css/academicons.min.css">
+  <link rel="stylesheet" href="./static/css/index.css">
+  <link rel="icon" href="./static/images/favicon.svg">
+
+  <script src="./static/js/jquery.min.js"></script>
+  <script defer src="./static/js/fontawesome.all.min.js"></script>
+  <script src="./static/js/bulma-carousel.min.js"></script>
+  <script src="./static/js/index.js"></script>
+</head>
+
+<body>
+
+  <nav class="navbar" role="navigation" aria-label="main navigation">
+    <div class="navbar-brand">
+      <a role="button" class="navbar-burger" aria-label="menu" aria-expanded="false">
+        <span aria-hidden="true"></span>
+        <span aria-hidden="true"></span>
+        <span aria-hidden="true"></span>
+      </a>
+    </div>
+  </nav>
+
+
+  <section class="hero">
+    <div class="hero-body">
+      <div class="container is-max-desktop">
+        <div class="columns is-centered">
+          <div class="column has-text-centered">
+
+            <h1 class="title is-1 publication-title">LLM-Driven Unified Framework with Grid Diffusion<br>for Efficient Long Video Editing
+            </h1>
+
+            <!-- 作者。有个人主页的话把名字包一层 <a href="..." target="_blank"> 即可 -->
+            <div class="is-size-5 publication-authors">
+              <span class="author-block">
+                Deyin Liu<sup>1</sup>,
+              </span>
+              <span class="author-block">
+                Li He<sup>1</sup>,
+              </span>
+              <span class="author-block">
+                Zhan Li<sup>2</sup>,
+              </span>
+              <span class="author-block">
+                Chengwu Liang<sup>3</sup>
+              </span>
+            </div>
+
+            <div class="is-size-5 publication-authors">
+              <span class="author-block"><sup>1</sup>Anhui University,</span>
+              <span class="author-block"><sup>2</sup>Southwest Jiaotong University,</span>
+              <span class="author-block"><sup>3</sup>Henan University of Urban Construction</span>
+            </div>
+
+            <div class="column has-text-centered">
+              <div class="publication-links">
+
+                <!-- TODO: arXiv 挂出来后替换编号;还没有就先注释掉这一块 -->
+                <span class="link-block">
+                  <a href="https://arxiv.org/abs/XXXX.XXXXX" class="external-link button is-normal is-rounded is-dark"
+                    target="_blank">
+                    <span class="icon">
+                      <i class="ai ai-arxiv"></i>
+                    </span>
+                    <span>arXiv</span>
+                  </a>
+                </span>
+
+                <span class="link-block">
+                  <a href="https://github.com/Lily-QAQ/UELVE" class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon">
+                      <i class="fab fa-github"></i>
+                    </span>
+                    <span>Code</span>
+                  </a>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- 结果轮播:每个 .item 左半是源视频,右半是编辑结果,每 5 秒自动切换 -->
+  <section class="hero is-light is-small">
+    <div class="hero-body">
+      <div class="container">
+        <div id="results-carousel" class="carousel results-carousel">
+          <div class="item item-sunset">
+            <img src="./assets/prompts/strip_sunset.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/compare_sunset.gif" width="100%">
+          </div>
+          <div class="item item-wooden">
+            <img src="./assets/prompts/strip_wooden.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/compare_wooden.gif" width="100%">
+          </div>
+          <div class="item item-car">
+            <img src="./assets/prompts/strip_car.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/compare_car.gif" width="100%">
+          </div>
+          <div class="item item-cat">
+            <img src="./assets/prompts/strip_cat.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/compare_cat.gif" width="100%">
+          </div>
+          <div class="item item-pizza">
+            <img src="./assets/prompts/strip_pizza.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/compare_pizza.gif" width="100%">
+          </div>
+          <div class="item item-yellow">
+            <img src="./assets/prompts/strip_yellow.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/compare_yellow.gif" width="100%">
+          </div>
+          <div class="item item-dog">
+            <img src="./assets/prompts/strip_dog.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/compare_dog.gif" width="100%">
+          </div>
+          <div class="item item-panda">
+            <img src="./assets/prompts/strip_panda.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/compare_panda.gif" width="100%">
+          </div>
+          <div class="item item-bike">
+            <img src="./assets/prompts/strip_bike.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/compare_bike.gif" width="100%">
+          </div>
+          <div class="item item-panda2">
+            <img src="./assets/prompts/strip_panda2.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/compare_panda2.gif" width="100%">
+          </div>
+          <div class="item item-anime">
+            <img src="./assets/prompts/strip_anime.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/compare_anime.gif" width="100%">
+          </div>
+        </div>
+        <p class="has-text-centered is-size-6" style="color:#777; margin-top:4px;">
+          Left: source video &nbsp;·&nbsp; Right: editing result by UELVE
+        </p>
+      </div>
+    </div>
+  </section>
+
+
+  <section class="section">
+    <div class="container is-max-desktop">
+      <!-- Abstract -->
+      <div class="columns is-centered has-text-centered">
+        <div class="column is-four-fifths">
+          <h2 class="title is-3">Abstract</h2>
+          <div class="content has-text-justified">
+            <p>
+              Text-guided video editing aims to transform a source video according to a target text prompt while
+              preserving desired visual content and temporal coherence.
+              Despite recent progress, existing approaches often target specific editing scenarios (e.g., zero-shot or
+              one-shot, local or global editing), struggle to process long videos due to memory and computational
+              constraints.
+              In this paper, we propose <b>UELVE</b>, an Large Language Model-driven Unified framework for Efficient
+              Long-Video Editing based on pre-trained text-to-image diffusion models.
+              UELVE first exploits the reasoning capability of an LLM to automatically analyze the source and target
+              prompts, enabling adaptive decisions on editing strategies.
+              To support long-form video editing, we organize video frames into grids and perform sequential grid-based
+              diffusion, where grid self-attention explicitly ensures short-term consistency among neighboring frames.
+              Furthermore, a simple yet effective grid sliding mechanism is introduced to establish inter-grid
+              interactions, maintaining long-term temporal consistency.
+              In addition, UELVE naturally supports multi-GPU parallel inference with only minimal inter-GPU
+              communication, substantially improving editing efficiency.
+              Extensive experiments on a wide range of video editing scenarios demonstrate that UELVE consistently
+              achieves superior editing quality, strong temporal consistency, and significantly improved efficiency
+              compared with state-of-the-art methods.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- 方法图:论文 Figure 2 框架图 -->
+  <section class="hero teaser">
+    <div class="container is-max-desktop">
+      <div class="hero-body has-text-justified">
+        <img class="center-img" src="./assets/method.png" width="95%" />
+        <h2 class="subtitle">
+          Framework of UELVE. We first arrange the frames of input video V<sub>K</sub> into grids, encode them
+          into the latent space and then invert the original latents to Z<sub>T</sub>. Then we denoise the grid
+          latents Z<sub>T</sub> to Ẑ<sub>0</sub> via T time steps of iterations on a pre-trained Text-to-Image
+          diffusion model, decode Ẑ<sub>0</sub> and rearrange the resulted grid frames into an edited video
+          V̂<sub>K</sub> as output. For the denoising process, by comparing the source and target prompts, we
+          leverage an LLM to reason out specific editing goals and types and thus make decisions on
+          corresponding model adaptions, unifying diverse editing tasks into a same framework. Beyond the grid
+          self-attention for within-grid interactions, we perform a grid sliding manipulation to enhance
+          cross-grid interactions to maintain long-term consistency. Benefiting from the flexible grid
+          manipulations, a multi-GPU data parallel computing strategy is also considered to remarkably improve
+          the computation efficiency.
+        </h2>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- 编辑场景:论文 Figure 1 teaser -->
+  <section class="section" id="scenarios">
+    <div class="container is-max-desktop">
+      <h2 class="title is-3 has-text-centered">Diverse Editing Scenarios</h2>
+      <div class="content has-text-centered">
+        <img class="center-img" src="./assets/teaser.png" width="95%" />
+        <p class="subtitle has-text-justified">
+          UELVE is an efficient long-video editing method that leverages LLM to make decisions on model
+          adaptions according to specific editing types, implements grid diffusion on a pre-trained
+          Text-to-Image model to maintain short-term and long-term consistencies, and enhances the efficiency
+          by multi-GPU data parallel computation. It is applicable to diverse editing tasks, including
+          object/background replacement, local editing of attributes (style, color, shape), global style
+          transformation and even motion editing.
+        </p>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- 实验结果:主结果图/表 -->
+  <section class="section" id="results">
+    <div class="container is-max-desktop">
+      <h2 class="title is-3 has-text-centered">Main Results</h2>
+      <div class="content has-text-centered">
+        <img class="center-img" src="./assets/results.png" width="85%" />
+        <p class="subtitle has-text-justified">
+          Qualitative comparison with baseline methods. Compared with one-shot methods
+          (Video-p2p, FateZero) and zero-shot methods (RAVE, ControlVideo), UELVE (Attention and
+          ControlNet variants) achieves better editing fidelity and temporal consistency.
+          Quantitative comparisons and ablation studies are provided in the paper.
+        </p>
+
+        <!-- TODO: 可选——纯 HTML 表格版主结果,照行复制即可
+        <div class="table-container">
+          <table class="table is-bordered is-striped is-narrow is-hoverable is-fullwidth">
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>CLIP-T</th>
+                <th>PickScore</th>
+                <th>Time (s)</th>
+                <th>Mem (GB)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Baseline</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+              <tr class="is-selected"><td>UELVE</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+            </tbody>
+          </table>
+        </div>
+        -->
+      </div>
+    </div>
+  </section>
+
+
+  <!-- 演示视频:GIF 上下拼接(上:源视频,下:梵高风格编辑结果);有正式视频后可换回下方注释的 YouTube/Bilibili -->
+  <section class="section" id="video">
+    <div class="container is-max-desktop">
+      <h2 class="title is-3 has-text-centered">Demo Long Video</h2>
+      <div class="columns is-centered has-text-centered">
+        <div class="column is-two-thirds">
+          <div class="publication-video" style="height:auto; padding-bottom:0;">
+            <img src="./assets/demo_vangogh.gif" alt="Long-video editing demo: source (top) vs. Van Gogh style edited by UELVE (bottom)"
+              style="width:100%; border-radius:10px; box-shadow:0 2px 8px 0 rgba(0,0,0,0.2), 0 6px 10px 0 rgba(0,0,0,0.19);">
+          </div>
+          <p class="is-size-6" style="color:#777; margin-top:6px;">
+            Top: source video &nbsp;·&nbsp; Bottom: Van Gogh style transfer by UELVE
+          </p>
+          <!-- YouTube:
+          <iframe src="https://www.youtube.com/embed/VIDEO_ID"
+            title="Demo video" frameborder="0"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope"
+            allowfullscreen></iframe>
+          -->
+          <!-- Bilibili(把 bvid 换成你的 BV号) :
+          <iframe src="//player.bilibili.com/player.html?bvid=BV1xx411c7mD&page=1&autoplay=0"
+            title="Demo video" frameborder="0"
+            allow="fullscreen; encrypted-media" allowfullscreen></iframe>
+          -->
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <section class="section" id="BibTeX">
+    <div class="container is-max-desktop content">
+      <h2 class="title">Citation</h2>
+      <!-- TODO: 正式发表后把 journal 换成期刊/会议名 -->
+      <pre><code>@article{liu2026uelve,
+  author    = {Liu, Deyin and He, Li and Li, Zhan and Liang, Chengwu},
+  title     = {LLM-Driven Unified Framework with Grid Diffusion for Efficient Long Video Editing},
+  journal   = {arXiv preprint arXiv:XXXX.XXXXX},
+  year      = {2026},
+}</code></pre>
+    </div>
+  </section>
+
+
+  <footer class="footer">
+    <div class="container">
+      <div class="columns is-centered">
+        <div class="column is-8">
+          <div class="content">
+            <p>
+              This website is licensed under a <a rel="license"
+                href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+                Commons Attribution-ShareAlike 4.0 International License</a>.
+            </p>
+            <p>
+              Website template credit to <a href="https://nerfies.github.io/">Nerfies</a>.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+</body>
+
+</html>
