@@ -29,12 +29,12 @@ $(document).ready(function() {
 
     });
 
-    // 长视频轮播:单张展示,不自动切换
+    // 长视频轮播:多组长视频,可循环手动切换,不自动跳(每段都是完整循环播放的视频)
     bulmaCarousel.attach('#longvideo-carousel', {
         slidesToScroll: 1,
         slidesToShow: 1,
-        loop: false,
-        infinite: false,
+        loop: true,
+        infinite: true,
         autoplay: false,
     });
 
