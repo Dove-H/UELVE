@@ -148,6 +148,13 @@ body {
 
 }
 
+/* 单张长视频轮播:隐藏左右切换箭头与分页圆点 */
+#longvideo-carousel .slider-navigation-previous,
+#longvideo-carousel .slider-navigation-next,
+#longvideo-carousel .slider-pagination {
+  display: none !important;
+}
+
 .item-truck{
   margin-left: auto;
   margin-right: auto;

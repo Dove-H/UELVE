@@ -43,9 +43,6 @@
             <!-- 作者。有个人主页的话把名字包一层 <a href="..." target="_blank"> 即可 -->
             <div class="is-size-5 publication-authors">
               <span class="author-block">
-                Deyin Liu<sup>1</sup>,
-              </span>
-              <span class="author-block">
                 Li He<sup>1</sup>,
               </span>
               <span class="author-block">
@@ -77,7 +74,7 @@
                 </span>
 
                 <span class="link-block">
-                  <a href="https://github.com/Lily-QAQ/UELVE" class="external-link button is-normal is-rounded is-dark">
+                  <a href="https://github.com/Dove-H/UELVE" class="external-link button is-normal is-rounded is-dark">
                     <span class="icon">
                       <i class="fab fa-github"></i>
                     </span>
@@ -93,59 +90,64 @@
   </section>
 
 
-  <!-- 结果轮播:每个 .item 左半是源视频,右半是编辑结果,每 5 秒自动切换 -->
-  <section class="hero is-light is-small">
+  <!-- 顶部演示区:长视频轮播(左=原视频,右=Van Gogh 编辑结果)+ 两个分组小轮播 -->
+  <section class="hero is-light is-small" id="video">
     <div class="hero-body">
       <div class="container">
-        <div id="results-carousel" class="carousel results-carousel">
-          <div class="item item-sunset">
-            <img src="./assets/prompts/strip_sunset.png" width="100%" style="padding-top: 2%;">
-            <img src="./assets/compare_sunset.gif" width="100%">
-          </div>
-          <div class="item item-wooden">
-            <img src="./assets/prompts/strip_wooden.png" width="100%" style="padding-top: 2%;">
-            <img src="./assets/compare_wooden.gif" width="100%">
-          </div>
-          <div class="item item-car">
-            <img src="./assets/prompts/strip_car.png" width="100%" style="padding-top: 2%;">
-            <img src="./assets/compare_car.gif" width="100%">
-          </div>
-          <div class="item item-cat">
-            <img src="./assets/prompts/strip_cat.png" width="100%" style="padding-top: 2%;">
-            <img src="./assets/compare_cat.gif" width="100%">
-          </div>
-          <div class="item item-pizza">
-            <img src="./assets/prompts/strip_pizza.png" width="100%" style="padding-top: 2%;">
-            <img src="./assets/compare_pizza.gif" width="100%">
-          </div>
-          <div class="item item-yellow">
-            <img src="./assets/prompts/strip_yellow.png" width="100%" style="padding-top: 2%;">
-            <img src="./assets/compare_yellow.gif" width="100%">
-          </div>
-          <div class="item item-dog">
-            <img src="./assets/prompts/strip_dog.png" width="100%" style="padding-top: 2%;">
-            <img src="./assets/compare_dog.gif" width="100%">
-          </div>
-          <div class="item item-panda">
-            <img src="./assets/prompts/strip_panda.png" width="100%" style="padding-top: 2%;">
-            <img src="./assets/compare_panda.gif" width="100%">
-          </div>
-          <div class="item item-bike">
-            <img src="./assets/prompts/strip_bike.png" width="100%" style="padding-top: 2%;">
-            <img src="./assets/compare_bike.gif" width="100%">
-          </div>
-          <div class="item item-panda2">
-            <img src="./assets/prompts/strip_panda2.png" width="100%" style="padding-top: 2%;">
-            <img src="./assets/compare_panda2.gif" width="100%">
-          </div>
-          <div class="item item-anime">
-            <img src="./assets/prompts/strip_anime.png" width="100%" style="padding-top: 2%;">
-            <img src="./assets/compare_anime.gif" width="100%">
+
+        <!-- 长视频:单张轮播,以后新增长视频 demo 直接追加 .item 即可 -->
+        <div id="longvideo-carousel" class="carousel results-carousel">
+          <div class="item item-vangogh">
+            <img src="./assets/prompts/strip_vangogh.png" width="100%" style="padding-top: 2%;">
+            <img src="./assets/demo_vangogh_lr.gif"
+              alt="Long-video editing demo: source (left) vs. Van Gogh style edited by UELVE (right)" width="100%">
           </div>
         </div>
-        <p class="has-text-centered is-size-6" style="color:#777; margin-top:4px;">
-          Left: source video &nbsp;·&nbsp; Right: editing result by UELVE
-        </p>
+
+        <!-- 分组小轮播:左=兔子吃西瓜组,右=骑车组(car 组暂不展示) -->
+        <div class="columns" style="margin-top:1.75rem;">
+          <div class="column is-half">
+            <div id="carousel-rabbit" class="carousel results-carousel">
+              <div class="item item-cat">
+                <img src="./assets/prompts/strip_cat.png" width="100%" style="padding-top: 2%;">
+                <img src="./assets/compare_cat.gif" width="100%">
+              </div>
+              <div class="item item-pizza">
+                <img src="./assets/prompts/strip_pizza.png" width="100%" style="padding-top: 2%;">
+                <img src="./assets/compare_pizza.gif" width="100%">
+              </div>
+              <div class="item item-yellow">
+                <img src="./assets/prompts/strip_yellow.png" width="100%" style="padding-top: 2%;">
+                <img src="./assets/compare_yellow.gif" width="100%">
+              </div>
+              <div class="item item-dog">
+                <img src="./assets/prompts/strip_dog.png" width="100%" style="padding-top: 2%;">
+                <img src="./assets/compare_dog.gif" width="100%">
+              </div>
+              <div class="item item-panda">
+                <img src="./assets/prompts/strip_panda.png" width="100%" style="padding-top: 2%;">
+                <img src="./assets/compare_panda.gif" width="100%">
+              </div>
+            </div>
+          </div>
+          <div class="column is-half">
+            <div id="carousel-child" class="carousel results-carousel">
+              <div class="item item-bike">
+                <img src="./assets/prompts/strip_bike.png" width="100%" style="padding-top: 2%;">
+                <img src="./assets/compare_bike.gif" width="100%">
+              </div>
+              <div class="item item-panda2">
+                <img src="./assets/prompts/strip_panda2.png" width="100%" style="padding-top: 2%;">
+                <img src="./assets/compare_panda2.gif" width="100%">
+              </div>
+              <div class="item item-anime">
+                <img src="./assets/prompts/strip_anime.png" width="100%" style="padding-top: 2%;">
+                <img src="./assets/compare_anime.gif" width="100%">
+              </div>
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
   </section>
@@ -259,36 +261,6 @@
           </table>
         </div>
         -->
-      </div>
-    </div>
-  </section>
-
-
-  <!-- 演示视频:GIF 上下拼接(上:源视频,下:梵高风格编辑结果);有正式视频后可换回下方注释的 YouTube/Bilibili -->
-  <section class="section" id="video">
-    <div class="container is-max-desktop">
-      <h2 class="title is-3 has-text-centered">Demo Long Video</h2>
-      <div class="columns is-centered has-text-centered">
-        <div class="column is-two-thirds">
-          <div class="publication-video" style="height:auto; padding-bottom:0;">
-            <img src="./assets/demo_vangogh.gif" alt="Long-video editing demo: source (top) vs. Van Gogh style edited by UELVE (bottom)"
-              style="width:100%; border-radius:10px; box-shadow:0 2px 8px 0 rgba(0,0,0,0.2), 0 6px 10px 0 rgba(0,0,0,0.19);">
-          </div>
-          <p class="is-size-6" style="color:#777; margin-top:6px;">
-            Top: source video &nbsp;·&nbsp; Bottom: Van Gogh style transfer by UELVE
-          </p>
-          <!-- YouTube:
-          <iframe src="https://www.youtube.com/embed/VIDEO_ID"
-            title="Demo video" frameborder="0"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope"
-            allowfullscreen></iframe>
-          -->
-          <!-- Bilibili(把 bvid 换成你的 BV号) :
-          <iframe src="//player.bilibili.com/player.html?bvid=BV1xx411c7mD&page=1&autoplay=0"
-            title="Demo video" frameborder="0"
-            allow="fullscreen; encrypted-media" allowfullscreen></iframe>
-          -->
-        </div>
       </div>
     </div>
   </section>
