@@ -22,7 +22,7 @@ the computation efficiency.</i></p>
 ## 🔗 Links
 
 - **[📄 arXiv](https://arxiv.org/abs/XXXX.XXXXX)** — Coming Soon
-- **[🌐 Project Page](https://lily-qaq.github.io/UELVE/)**
+- **[🌐 Project Page](https://dove-h.github.io/UELVE/)**
 - **🤗 Demo** — Coming Soon
 - **🗂️ DataSets** — Coming Soon
 - **🧱 Model Weights** — Coming Soon
@@ -78,7 +78,7 @@ motion editing.
   </tr>
 </table>
 
-More results and analysis are provided in the [project page](https://lily-qaq.github.io/UELVE/) and the paper.
+More results and analysis are provided in the [project page](https://dove-h.github.io/UELVE/) and the paper.
 
 ## 📚 Citation
 
