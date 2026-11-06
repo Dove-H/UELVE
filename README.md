@@ -35,22 +35,36 @@ the computation efficiency.</i></p>
 
 ## 🚀 Quick Start
 
-<!-- TODO: fill in once the code is released -->
-
 ### 1. Environment
 
 ```bash
-# Example: adjust dependencies to your actual setup
 conda create -n uelve python=3.10 -y
 conda activate uelve
+
+# PyTorch with CUDA 11.8
+pip install torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cu118
+pip install xformers==0.0.20 --index-url https://download.pytorch.org/whl/cu118
+
+# Dependencies
 pip install -r requirements.txt
 ```
 
+> **LLM routing (optional).** To let the LLM automatically decide the editing strategy
+> (mask / no-mask, zero-shot / one-shot, model adaption), set `Use_DeepSeek: True` in the
+> config and export your DeepSeek API key first:
+>
+> ```bash
+> export DEEPSEEK_API_KEY=sk-xxx
+> ```
+
 ### 2. Run
 
+Each editing case is defined by a YAML config (video path, source/target prompts, grid
+size, method, etc., see `config/edit/` for examples). Set `pretrained_model_path` in the
+config to your local [Stable Diffusion v1.5](https://huggingface.co/runwayml/stable-diffusion-v1-5) checkpoint, then run:
+
 ```bash
-# TODO: minimal reproducible command
-python run.py --source_video examples/wolf.mp4 --target_prompt "..."
+CUDA_VISIBLE_DEVICES=0 python test_fatezero.py --config config/edit/wolf8f.yaml
 ```
 
 ## 📊 Main Results
