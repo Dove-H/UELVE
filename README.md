@@ -25,7 +25,6 @@ the computation efficiency.</i></p>
 - **[🌐 Project Page](https://dove-h.github.io/UELVE/)**
 - **🤗 Demo** — Coming Soon
 - **🗂️ DataSets** — Coming Soon
-- **🧱 Model Weights** — Coming Soon
 
 ## 📰 News
 
@@ -66,8 +65,8 @@ size, method, etc., see `config/edit/` for examples). Set `pretrained_model_path
 config to your local [Stable Diffusion v1.5](https://huggingface.co/runwayml/stable-diffusion-v1-5) checkpoint, then run:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python test_fatezero.py --config config/edit/wolf8f.yaml
-CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 test_fatezero.py --config config/edit/wolf8f.yaml
+CUDA_VISIBLE_DEVICES=0 python test_fatezero.py --config config/edit/wolf.yaml
+CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 test_fatezero.py --config config/edit/wolf.yaml
 ```
 
 ## 📊 Main Results
@@ -112,7 +111,7 @@ If you find this work helpful, please cite:
 
 ## 💗 Acknowledgements
 
-This repository borrows heavily from [Tune-A-Video](https://github.com/showlab/Tune-A-Video), [Tune-A-Video](https://github.com/rehglab/RAVE) and [FateZero](https://github.com/ChenyangQiQi/FateZero). Thanks to the authors for sharing their code and models.
+This repository borrows heavily from [Tune-A-Video](https://github.com/showlab/Tune-A-Video), [RAVE](https://github.com/rehglab/RAVE) and [FateZero](https://github.com/ChenyangQiQi/FateZero). Thanks to the authors for sharing their code and models.
 
 ## 🧿 Maintenance
 
