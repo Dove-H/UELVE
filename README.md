@@ -49,13 +49,17 @@ pip install xformers==0.0.20 --index-url https://download.pytorch.org/whl/cu118
 pip install -r requirements.txt
 ```
 
-> **LLM routing (optional).** To let the LLM automatically decide the editing strategy
-> (mask / no-mask, zero-shot / one-shot, model adaption), set `Use_DeepSeek: True` in the
-> config and export your DeepSeek API key first:
+> **LLM routing (optional).** To let the LLM automatically decide the editing strategy, set `Use_DeepSeek: True` in the config yaml and export your DeepSeek API key first:
 >
 > ```bash
 > export DEEPSEEK_API_KEY=sk-xxx
 > ```
+
+>**Basic image contrl strategy, set the `Method` in config yaml: FateZero for Attention mode and ControlNet for ControlNet mode
+
+>**RUN in Single-GPU**: CUDA_VISIBLE_DEVICES=1  python   test_fatezero.py --config config/edit/wolf8f.yaml
+>**RUN in Multi-GPU** : CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 test_fatezero.py --config config/edit/wolf8f.yaml
+
 
 ### 2. Run
 
@@ -107,10 +111,10 @@ If you find this work helpful, please cite:
 }
 ```
 
-## 🙏 Acknowledgements
+## 💗 Acknowledgements
 
-The project page is built on the [Nerfies](https://nerfies.github.io/) template.
+This repository borrows heavily from [Tune-A-Video](https://github.com/showlab/Tune-A-Video), [Tune-A-Video](https://github.com/rehglab/RAVE) and [FateZero](https://github.com/ChenyangQiQi/FateZero). Thanks to the authors for sharing their code and models.
 
-## ⚖️ License
+## 🧿 Maintenance
 
-TODO: choose a license (MIT / Apache-2.0) and add a LICENSE file.
+This is the codebase for our research work. We are still working hard to update this repo, and more details are coming in days. If you have any questions or ideas to discuss, feel free to contact [Deyin Liu](iedyzzu@outlook.com) or [Li He](wa24301131@stu.ahu.cn).
