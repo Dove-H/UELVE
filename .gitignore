@@ -6,8 +6,6 @@
 /data
 /config
 __pycache__/
-/diffusersC
-/diffusersF
 /annotator
 /pretrained_models
 /Control
