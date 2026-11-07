@@ -228,9 +228,9 @@ def _get_client():
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not api_key:
         raise SystemExit(
-            "[DeepSeek] 未检测到 DEEPSEEK_API_KEY 环境变量（Use_DeepSeek=True 时必需）。\n"
-            "  解决：在运行终端执行 export DEEPSEEK_API_KEY=sk-xxx，或 source ~/.bashrc 后重试；\n"
-            "  VSCode/IDE 内启动的终端需要重开才会继承新配置。")
+            "[DeepSeek] DEEPSEEK_API_KEY environment variable not set (required when Use_DeepSeek=True).\n"
+            "  Fix: run 'export DEEPSEEK_API_KEY=sk-xxx' in the launching terminal, or 'source ~/.bashrc' and retry;\n"
+            "  Terminals launched from VSCode/IDE must be reopened to pick up the new config.")
     return OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
 
@@ -294,7 +294,7 @@ def LLM_stream(source_prompt, target_prompt):
             if m:
                 adaption = m.group(1).strip()
                 t_adaption = (time.perf_counter() - t0) * 1000
-                print(f"[DeepSeek][stream] model_adaption 提前解析成功 @ {t_adaption:.0f} ms: {adaption!r}")
+                print(f"[DeepSeek][stream] model_adaption parsed early @ {t_adaption:.0f} ms: {adaption!r}")
                 break
     t_end = (time.perf_counter() - t0) * 1000
 
@@ -302,7 +302,7 @@ def LLM_stream(source_prompt, target_prompt):
         result = parse_llm_response(buf)
         adaption = result.get("model_adaption") if isinstance(result, dict) else None
         t_adaption = t_end
-        print(f"[DeepSeek][stream] 未能提前解析，流结束后全量解析 @ {t_end:.0f} ms: {adaption!r}")
+        print(f"[DeepSeek][stream] early parse failed; full parse after stream end @ {t_end:.0f} ms: {adaption!r}")
 
     info = {"t_adaption_ms": t_adaption, "t_total_ms": t_end, "partial": buf}
     return adaption, info
@@ -323,7 +323,7 @@ def parse_llm_response(response):
             if isinstance(result_dict, dict):
                 return result_dict
             else:
-                raise ValueError("解析结果不是字典格式")
+                raise ValueError("parsed result is not a dict")
         except (ValueError, SyntaxError):
             m = None
             for q1 in ("'", '"'):
@@ -378,7 +378,7 @@ def parse_llm_response(response):
                 else:
                     return {}
             except Exception as e:
-                print(f"解析响应时出错: {e}")
+                print(f"error parsing response: {e}")
                 return {}
 
 

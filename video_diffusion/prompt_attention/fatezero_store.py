@@ -98,7 +98,7 @@ class InversionStore(AttentionControl):
 
     def end_grid(self, grid: int):
         step = self._cur_step
-        """把本次 UNet 调用新增的 attention map 截成一个分片并存储。"""
+        """Slice the attention maps added by this UNet call into a shard and store it."""
         shard = {k: v[self._mark[k]:] for k, v in self.step_store.items()}
         for k, v in self.step_store.items():
             del v[self._mark[k]:]
@@ -112,8 +112,8 @@ class InversionStore(AttentionControl):
                 self._layers_per_call[k] = len(v)
             else:
                 assert len(v) == known, (
-                    f"[InversionStore] {k} 层数不稳定（{len(v)} != {known}），"
-                    "分片对齐可能被破坏")
+                    f"[InversionStore] {k} layer count unstable ({len(v)} != {known}), "
+                    "shard alignment may be broken")
 
         if all(len(v) == 0 for v in shard.values()):
             return
@@ -142,7 +142,7 @@ class InversionStore(AttentionControl):
             self._write_queue.put(None)
             self._write_thread.join()
             if self._write_error:
-                raise RuntimeError(f'反演分片异步落盘失败: {self._write_error[0]}')
+                raise RuntimeError(f'async inversion-shard offload failed: {self._write_error[0]}')
             os.makedirs(self.store_dir, exist_ok=True)
             with timer('store_write_init'):
                 torch.save(self.init_latent.cpu(), os.path.join(self.store_dir, 'init.pt'))
@@ -272,16 +272,16 @@ class ReplayProvider:
         _t0 = time.perf_counter() if elve_timing.ENABLED else None
         item = self._queue.get()
         if item is None:
-            raise RuntimeError('[ReplayProvider] 预取序列耗尽，消费超出预期')
+            raise RuntimeError('[ReplayProvider] prefetch sequence exhausted; consumed more than expected')
         if _t0 is not None:
             add('store_wait_main', time.perf_counter() - _t0)
         expected = next(self._expected, None)
-        assert item[0] == expected, f"[ReplayProvider] 消费乱序: got {item[0]}, expect {expected}"
+        assert item[0] == expected, f"[ReplayProvider] out-of-order consumption: got {item[0]}, expect {expected}"
         return item
 
     def get_shard(self, step: int, grid: int):
         item, payload = self._next()
-        assert item == ('shard', step, grid), f"[ReplayProvider] 分片错位: got {item}, want {(step, grid)}"
+        assert item == ('shard', step, grid), f"[ReplayProvider] shard mismatch: got {item}, want {(step, grid)}"
         if isinstance(payload, dict):
             with timer('store_h2d'):
                 payload = {k: [t.to(self.device, self.dtype) for t in v] for k, v in payload.items()}
@@ -289,7 +289,7 @@ class ReplayProvider:
 
     def get_latent(self, step: int):
         item, payload = self._next()
-        assert item == ('latent', step), f"[ReplayProvider] latent 错位: got {item}, want {('latent', step)}"
+        assert item == ('latent', step), f"[ReplayProvider] latent mismatch: got {item}, want {('latent', step)}"
         if torch.is_tensor(payload):
             with timer('store_h2d'):
                 payload = payload.to(self.device, self.dtype)

@@ -57,7 +57,7 @@ class AttentionControlEdit(AttentionControl, abc.ABC):
     def begin_edit_step(self, edit_step: int):
         self.cur_step = edit_step
         self.cur_att_layer = 0
-        assert self.use_inversion_attention, "重构版 FateZero pipeline 仅支持 use_inversion_attention=True"
+        assert self.use_inversion_attention, "refactored FateZero pipeline only supports use_inversion_attention=True"
         self._store_step = self.num_steps - 1 - edit_step
         self._step_shards = []
 

@@ -91,7 +91,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         gA = self.grid_sizeH * self.grid_sizeW
         n_pad = (-n_real) % gA
         if n_pad:
-            print(f'[ControlNet] 帧数 {n_real} 非 {gA} 整数倍，复制末帧补齐到 {n_real + n_pad}')
+            print(f'[ControlNet] frame count {n_real} not a multiple of {gA}; padded by repeating last frame to {n_real + n_pad}')
             image = torch.cat([image, image[:, :, -1:, :, :].expand(-1, -1, n_pad, -1, -1)], dim=2)
         self._n_real = n_real
         self.video_length = n_real + n_pad
@@ -300,7 +300,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=2)
         _n_pad_c = (-control_image.shape[2]) % (self.grid_sizeH * self.grid_sizeW)
         if _n_pad_c:
-            print(f'[ControlNet] 编辑阶段 control_image 帧数 {control_image.shape[2]} 补齐到 '
+            print(f'[ControlNet] editing-stage control_image frames {control_image.shape[2]} padded to '
                   f'{control_image.shape[2] + _n_pad_c}')
             control_image = torch.cat([control_image, control_image[:, :, -1:, :, :].expand(-1, -1, _n_pad_c, -1, -1)], dim=2)
         control_image = grid.combine_frames_in_grid(control_image, self.grid_sizeH, self.grid_sizeW)

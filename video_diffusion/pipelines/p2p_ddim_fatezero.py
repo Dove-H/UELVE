@@ -199,7 +199,7 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         gA = self.grid_sizeH * self.grid_sizeW
         n_pad = (-n_real) % gA
         if n_pad:
-            print(f'[FateZero] 帧数 {n_real} 非 {gA} 整数倍，复制末帧补齐到 {n_real + n_pad}')
+            print(f'[FateZero] frame count {n_real} not a multiple of {gA}; padded by repeating last frame to {n_real + n_pad}')
             image = torch.cat([image, image[:, :, -1:, :, :].expand(-1, -1, n_pad, -1, -1)], dim=2)
         self._n_real = n_real
         self.video_length = n_real + n_pad
@@ -233,11 +233,11 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         self._num_inv_steps = num_inference_steps
 
         keep_on_gpu = self.video_length <= self.memory_frames
-        print(f'[FateZero] 帧数(含补齐)={self.video_length} memory_frames={self.memory_frames} '
-              f'→ 特征{"驻留GPU" if keep_on_gpu else "异步落盘+编辑期预取"}')
+        print(f'[FateZero] frames(incl. padding)={self.video_length} memory_frames={self.memory_frames} '
+              f'-> features {"kept on GPU" if keep_on_gpu else "offloaded to disk + prefetched during editing"}')
 
         if (not self.All_Inversion) and InversionStore.cache_valid(self.store_dir, meta, need):
-            print(f'[FateZero] 缓存命中，跳过反演: {self.store_dir}')
+            print(f'[FateZero] cache hit, skipping inversion: {self.store_dir}')
             self._inv_store = None
             init_latent = InversionStore.load_cached(self.store_dir)
             return init_latent.to(device=self._execution_device,

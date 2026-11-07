@@ -181,7 +181,7 @@ def _wait_for_file(path, timeout_s, what, fresh_after=None):
             with open(path) as f:
                 return f.read()
         if time.time() - t0 > timeout_s:
-            raise TimeoutError(f"等待 {what} 超时: {path}")
+            raise TimeoutError(f"Timed out waiting for {what}: {path}")
         time.sleep(5)
 
 
@@ -196,12 +196,12 @@ def _find_tune_yaml(dataset_path):
         have = os.path.normpath(os.path.join(PROJECT_ROOT, str(tp)))
         if have == want:
             rel = os.path.relpath(cand, PROJECT_ROOT)
-            print(f"[tune] 未配置 tune-yaml，按数据集 {dataset_path} 自动匹配: {rel}")
+            print(f"[tune] no tune-yaml configured; auto-matched by dataset {dataset_path}: {rel}")
             return rel
     raise SystemExit(
-        f"[ELVE] temporal 路由需要 tune 配置，但 config/tune/ 下没有 train_data.video_path "
-        f"匹配 {dataset_path} 的 yaml。请在编辑配置里显式加一行 tune-yaml: <path>，"
-        f"或参照 config/tune/ 现有配置新建（train_data.video_path 需指向同一数据集）。")
+        f"[ELVE] temporal routing needs a tune config, but no yaml in config/tune/ has train_data.video_path "
+        f"matching {dataset_path}. Add an explicit 'tune-yaml: <path>' line to the edit config, "
+        f"or create one following existing configs in config/tune/ (train_data.video_path must point to the same dataset).")
 
 
 def run_tune(tune_config_path):
@@ -213,7 +213,7 @@ def run_tune(tune_config_path):
     done_marker = os.path.join(output_dir, TUNE_DONE_MARKER)
 
     if os.path.isdir(output_dir) and "unet" in os.listdir(output_dir):
-        print(f"[tune] 已存在微调模型 {output_dir}，跳过 tune（如需重训请删除该目录）")
+        print(f"[tune] tuned model already exists at {output_dir}, skipping tune (delete that directory to retrain)")
     else:
         accelerate_bin = os.path.join(os.path.dirname(sys.executable), "accelerate")
         world = int(os.environ.get("WORLD_SIZE", "1") or 1)
@@ -231,18 +231,18 @@ def run_tune(tune_config_path):
             if n_proc > 1:
                 launcher.append(f"--main_process_port={_pick_free_port()}")
         elif n_proc > 1:
-            raise SystemExit(f"[tune] 多卡 tune 需要 accelerate launch，未找到: {accelerate_bin}")
+            raise SystemExit(f"[tune] multi-GPU tune requires accelerate launch, not found: {accelerate_bin}")
         else:
             launcher = [sys.executable]
         cmd = launcher + ["run_tuning_1.py", "--config", tune_config_path]
-        print(f"[tune] one-shot(temporal module) -> 启动微调({n_proc}进程): {' '.join(cmd)}"
+        print(f"[tune] one-shot(temporal module) -> launching tuning ({n_proc} procs): {' '.join(cmd)}"
               f"  (CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES', '')})")
         subprocess.run(cmd, check=True, cwd=PROJECT_ROOT, env=env)
         assert "unet" in os.listdir(output_dir), \
-            f"tune 结束但 {output_dir} 下没有 unet/，微调产物不完整"
+            f"tuning finished but no unet/ under {output_dir}; tuning artifacts incomplete"
     with open(done_marker, "w") as f:
         f.write(tune_config_path)
-    print(f"[tune] 微调完成，pipeline 将加载微调后模型: {output_dir}")
+    print(f"[tune] tuning done; pipeline will load the tuned model: {output_dir}")
     return output_dir
 
 
@@ -252,8 +252,8 @@ def launch_motioneditor(me_config=None):
     me_config_abs = me_config if os.path.isabs(me_config) else os.path.join(me_root, me_config)
     if not os.path.exists(me_config_abs):
         raise SystemExit(
-            f"[MotionEditor] 配置不存在: {me_config_abs}\n"
-            f"  请检查 motioneditor-yaml 字段或 target prompt 里的 case 标记是否写对了")
+            f"[MotionEditor] config not found: {me_config_abs}\n"
+            f"  check the motioneditor-yaml field or the case tag in the target prompt")
     eval_cfg = OmegaConf.load(me_config_abs)
 
     def _me_abs(p):
@@ -267,9 +267,9 @@ def launch_motioneditor(me_config=None):
     video_dir = _me_abs(eval_cfg["input_data"]["video_dir"])
     if not os.path.isdir(video_dir):
         raise SystemExit(
-            f"[MotionEditor] 数据目录不存在: {video_dir}\n"
-            f"  原视频/姿态条件无法自动补齐，请先按 case 数据集结构准备 "
-            f"（images/ source_condition/ target_condition/ frame_list.txt 等）")
+            f"[MotionEditor] data directory not found: {video_dir}\n"
+            f"  source video / pose conditions cannot be auto-prepared; prepare them following the case dataset layout "
+            f"(images/, source_condition/, target_condition/, frame_list.txt, etc.)")
 
     bg_ckpt = _me_abs(eval_cfg["resume_from_checkpoint"])
     adapter_pth = _me_abs(eval_cfg["adapter_weight_path"])
@@ -277,9 +277,9 @@ def launch_motioneditor(me_config=None):
                       and any(f.startswith(("model.", "pytorch_model")) for f in os.listdir(bg_ckpt)))
     ad_missing = not os.path.isfile(adapter_pth)
     if not (bg_missing or ad_missing):
-        print(f"[MotionEditor] 训练产物齐备:\n"
-              f"  背景 checkpoint: {bg_ckpt}\n"
-              f"  adapter 权重:    {adapter_pth}\n  直接推理")
+        print(f"[MotionEditor] training artifacts ready:\n"
+              f"  background checkpoint: {bg_ckpt}\n"
+              f"  adapter weights:    {adapter_pth}\n  running inference directly")
     else:
         case_dir = os.path.dirname(me_config)
         train_yamls = {"train_bg.py": os.path.join(case_dir, "train-bg.yaml"),
@@ -294,22 +294,22 @@ def launch_motioneditor(me_config=None):
                 else os.path.join(me_root, train_yamls[script])
             if not os.path.exists(yml_abs):
                 raise SystemExit(
-                    f"[MotionEditor] 训练产物缺失且找不到训练配置 {yml_abs}，无法自动补训")
-            print(f"[MotionEditor] {'背景 checkpoint' if script == 'train_bg.py' else 'adapter 权重'}"
-                  f" 缺失/失效 -> 自动补训（约 5 分钟/级）")
-            _me_run(script, train_yamls[script], f"自动补训 {script}")
+                    f"[MotionEditor] training artifacts missing and no training config found at {yml_abs}; cannot auto-retrain")
+            print(f"[MotionEditor] {'background checkpoint' if script == 'train_bg.py' else 'adapter weights'}"
+                  f" missing/invalid -> auto-retraining (~5 min per stage)")
+            _me_run(script, train_yamls[script], f"auto-retrain {script}")
 
-    _me_run("inference.py", me_config, "one-shot(Motion module) 推理")
+    _me_run("inference.py", me_config, "one-shot(Motion module) inference")
 
     out_dir = _me_abs(eval_cfg["output_dir"])
     if not os.path.isdir(out_dir):
-        raise SystemExit(f"[MotionEditor] 推理结束但输出目录不存在: {out_dir}")
+        raise SystemExit(f"[MotionEditor] inference finished but output directory not found: {out_dir}")
     result_root = os.path.join(PROJECT_ROOT, "result")
     dst = os.path.join(result_root, os.path.basename(out_dir))
     if os.path.isdir(dst):
         shutil.rmtree(dst)
     shutil.copytree(out_dir, dst)
-    print(f"[MotionEditor] 结果已复制到 {dst}（原产物仍在 {out_dir}）")
+    print(f"[MotionEditor] results copied to {dst} (originals still in {out_dir})")
 
 
 def _extract_motion_case(Omegadict):
@@ -329,8 +329,8 @@ def llm_decision_routing(Omegadict, config):
     forced = os.environ.get("ELVE_FORCE_PARADIGM", "").strip().lower()
     if forced:
         if forced not in ("zero-shot", "temporal", "motion"):
-            raise SystemExit(f"[ELVE] ELVE_FORCE_PARADIGM 只接受 zero-shot/temporal/motion，got {forced!r}")
-        print(f"[ELVE] ELVE_FORCE_PARADIGM={forced} 生效：跳过 DeepSeek，直接按该决策路由")
+            raise SystemExit(f"[ELVE] ELVE_FORCE_PARADIGM only accepts zero-shot/temporal/motion, got {forced!r}")
+        print(f"[ELVE] ELVE_FORCE_PARADIGM={forced} active: skipping DeepSeek, routing with this decision directly")
         paradigm = forced
     elif _is_main_process():
         if multi_proc:
@@ -340,8 +340,8 @@ def llm_decision_routing(Omegadict, config):
         adaption, info = deepseek.LLM_stream(source_prompt, target_prompt)
         paradigm = classify_adaption(adaption)
         if motion_case is not None and paradigm != "motion":
-            print(f"[ELVE] target prompt 带 MotionEditor case 标记（case-{motion_case}），"
-                  f"LLM 判定为 {paradigm}，强制校正为 motion")
+            print(f"[ELVE] target prompt carries a MotionEditor case tag (case-{motion_case}), "
+                  f"LLM decided {paradigm}; forcing correction to motion")
             paradigm = "motion"
             adaption = "no-mask, one-shot(Motion module)"
         if multi_proc:
@@ -356,7 +356,7 @@ def llm_decision_routing(Omegadict, config):
                 adaption = d.get("adaption", "")
                 break
             if time.time() - t0 > 600:
-                raise TimeoutError(f"等待 rank0 写入 yaml 的 LLM 决策超时: {config}")
+                raise TimeoutError(f"timed out waiting for rank0 to write the LLM decision into yaml: {config}")
             time.sleep(5)
 
     if paradigm == "motion":
@@ -375,8 +375,8 @@ def llm_decision_routing(Omegadict, config):
             overrides["editing_config"] = {
                 "p2p_config": {k: {"blend_words": None} for k in p2p_entries}
             }
-        print("[ELVE] no-mask(全局编辑)：memory_frames=8（特征分级存储，单卡超 8 帧落盘）；"
-              "blend_words 置 None 禁用 mask 机制（yaml 原值不生效，等效注释）")
+        print("[ELVE] no-mask (global edit): memory_frames=8 (tiered feature storage; >8 frames per single GPU offloaded to disk); "
+              "blend_words set to None disables the mask mechanism (yaml values ignored, as if commented out)")
     if paradigm == "temporal":
         overrides["method"] = "FateZero"
         tune_yaml = Omegadict.get("tune-yaml", None)
@@ -389,7 +389,7 @@ def llm_decision_routing(Omegadict, config):
             if not os.path.isabs(tune_output):
                 tune_output = os.path.join(PROJECT_ROOT, tune_output)
             _wait_for_file(os.path.join(tune_output, TUNE_DONE_MARKER), timeout_s=4 * 3600,
-                           what="rank0 的 tune 完成", fresh_after=_T_E2E_START - 5)
+                           what="rank0 tune completion", fresh_after=_T_E2E_START - 5)
             tuned_dir = tune_output
         overrides["pretrained_model_path"] = tuned_dir
     else:
@@ -575,7 +575,7 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
         try:
             pipeline.enable_xformers_memory_efficient_attention()
         except Exception as e:
-            print("xformers加载异常")  
+            print("xformers load failed")  
 
     return pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image,scheduler_config
 
@@ -604,12 +604,12 @@ def _save_edited_only_gif(logdir, step=0, idx=0):
             pass
         duration = gif.info.get('duration', duration)
     if not frames_all:
-        print(f"[ELVE] 未找到纯编辑帧 gif（step_{step}_{idx}_0_GPU*.gif），跳过 edited 拼接")
+        print(f"[ELVE] no pure-edit frame gif found (step_{step}_{idx}_0_GPU*.gif); skipping edited stitching")
         return
     out = os.path.join(sample_dir, 'step1_edited.gif')
     frames_all[0].save(out, save_all=True, append_images=frames_all[1:],
                        loop=0, duration=duration)
-    print(f"[ELVE] 纯编辑帧汇总已写出: {out}（{len(per_gpu)} 卡共 {len(frames_all)} 帧）")
+    print(f"[ELVE] pure-edit frame summary written: {out} ({len(per_gpu)} GPUs, {len(frames_all)} frames total)")
 
 
 def test(
@@ -642,10 +642,10 @@ def test(
     _target = test_pipeline_config.get("target", "") if test_pipeline_config else ""
     if method == "FateZero" and "spatial_temp" in _target:
         test_pipeline_config["target"] = "video_diffusion.pipelines.p2p_ddim_fatezero.P2pDDIMFateZeroPipeline"
-        print("[ELVE] method=FateZero：target 已自动从 ControlNet pipeline 切换为 P2pDDIMFateZeroPipeline")
+        print("[ELVE] method=FateZero: target auto-switched from ControlNet pipeline to P2pDDIMFateZeroPipeline")
     elif method == "ControlNet" and "fatezero" in _target:
         test_pipeline_config["target"] = "video_diffusion.pipelines.p2p_ddim_spatial_temp.P2pDDIMSpatiotempPipeline"
-        print("[ELVE] method=ControlNet：target 已自动从 FateZero pipeline 切换为 P2pDDIMSpatiotempPipeline")
+        print("[ELVE] method=ControlNet: target auto-switched from FateZero pipeline to P2pDDIMSpatiotempPipeline")
     controlnet_conditioning_scale = 1.0
     video_length = dataset_config["n_sample_frame"]
     time_string = get_time_string()
@@ -653,10 +653,10 @@ def test(
     if GPU_num>1:
         if 'RANK' not in os.environ or 'WORLD_SIZE' not in os.environ:
             raise SystemExit(
-                f"[ELVE] 检测到 {GPU_num} 张 GPU，但当前是裸 python 启动（无 RANK/WORLD_SIZE），"
-                f"无法走 torch.distributed 路径。\n"
-                f"  单卡运行: CUDA_VISIBLE_DEVICES=0 python test_fatezero.py --config <yaml>\n"
-                f"  多卡运行: CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 "
+                f"[ELVE] detected {GPU_num} GPUs, but launched with bare python (no RANK/WORLD_SIZE), "
+                f"cannot use the torch.distributed path.\n"
+                f"  single GPU: CUDA_VISIBLE_DEVICES=0 python test_fatezero.py --config <yaml>\n"
+                f"  multi GPU: CUDA_VISIBLE_DEVICES=0,1 accelerate launch --num_processes=2 "
                 f"test_fatezero.py --config <yaml>")
         with elve_timing.timer('comm_init_group'):
             dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo')
@@ -728,8 +728,8 @@ def test(
         assert batch["images"].shape[0] == 1, "Only support, overfiting on a single video"
         print("frames_per_GPU:", batch['images'].shape[2])
         if batch['images'].shape[2] * torch.cuda.device_count() != video_length:
-            print(f"[WARN] n_sample_frame={video_length} 不能被 GPU 数整除，"
-                  f"数据集按 floor 切分已丢弃尾部帧（当前保留 {batch['images'].shape[2] * torch.cuda.device_count()} 帧）")
+            print(f"[WARN] n_sample_frame={video_length} not divisible by GPU count, "
+                  f"dataset floor-split dropped trailing frames (currently keeping {batch['images'].shape[2] * torch.cuda.device_count()} frames)")
         
         vae.eval()
         text_encoder.eval()
@@ -740,8 +740,8 @@ def test(
             n_real_d = images.shape[2]
             n_pad_d = (-n_real_d) % (grid_sizeH * grid_sizeW)
             if n_pad_d:
-                print(f'[ControlNet] 深度图生成：帧数 {n_real_d} 非 {grid_sizeH*grid_sizeW} 整数倍，'
-                      f'复制末帧补齐到 {n_real_d + n_pad_d}')
+                print(f'[ControlNet] depth map generation: frame count {n_real_d} not a multiple of {grid_sizeH*grid_sizeW}, '
+                      f'padded by repeating last frame to {n_real_d + n_pad_d}')
                 images = torch.cat([images, images[:, :, -1:, :, :].expand(-1, -1, n_pad_d, -1, -1)], dim=2)
             images=grid.combine_frames_in_grid(images,grid_sizeH,grid_sizeW)
             images_for_depth = rearrange(images.to(dtype=weight_dtype), "b c f h w -> (b f) c h w")
@@ -856,7 +856,7 @@ def test(
                 duration = gif.info.get('duration', duration)
 
             if not combined_frames:
-                print(f"[ELVE] 未找到任何 step_0_GPU*.gif，跳过 step1.gif 拼接: {logdir}/sample")
+                print(f"[ELVE] no step_0_GPU*.gif found; skipping step1.gif stitching: {logdir}/sample")
             else:
                 output_path = f"{logdir}/sample/step1.gif"
                 combined_frames[0].save(

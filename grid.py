@@ -2,7 +2,7 @@ import torch
 #frame 2 grid
 def combine_frames_in_grid(video_tensor, grid_sizeH,grid_sizeW):
     batch_size, num_channels, video_length, height, width = video_tensor.shape
-    assert video_length % (grid_sizeH * grid_sizeW) == 0, "video_length 必须是 g * g 的倍数"
+    assert video_length % (grid_sizeH * grid_sizeW) == 0, "video_length must be a multiple of g * g"
 
     grid_h = height * grid_sizeH
     grid_w = width * grid_sizeW

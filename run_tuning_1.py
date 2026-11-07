@@ -96,7 +96,7 @@ def main(
         return latents_grid
 
     def process_with_unet(unet, latent_model_input, t, text_embeddings):
-        assert latent_model_input.shape[0] == 1, "process_with_unet 按 batch=1 设计"
+        assert latent_model_input.shape[0] == 1, "process_with_unet is designed for batch=1"
         n_grids = latent_model_input.shape[2]
         chunk = int(os.environ.get("ELVE_TUNE_FWD_CHUNK", "4") or 4)
         chunk = max(1, min(chunk, n_grids))
@@ -139,7 +139,7 @@ def main(
     _grid_sched = DDIMScheduler.from_pretrained(pretrained_model_path, subfolder="scheduler")
     _grid_sched.set_timesteps(ddim_grid_steps)
     ddim_timestep_grid = torch.as_tensor(_grid_sched.timesteps, dtype=torch.long, device=accelerator.device)
-    print(f"[tune] timestep 对齐推理格点: {ddim_grid_steps} 个 t, min={int(ddim_timestep_grid.min())} max={int(ddim_timestep_grid.max())}")
+    print(f"[tune] timesteps aligned to inference grid: {ddim_grid_steps} t values, min={int(ddim_timestep_grid.min())} max={int(ddim_timestep_grid.max())}")
     tokenizer = CLIPTokenizer.from_pretrained(pretrained_model_path, subfolder="tokenizer")
     text_encoder = CLIPTextModel.from_pretrained(pretrained_model_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(pretrained_model_path, subfolder="vae")
@@ -164,7 +164,7 @@ def main(
     ):
         unet.enable_gradient_checkpointing()
         print("gradient_checkpointing: on"
-              + (" (单卡>8f 自动启用)" if not gradient_checkpointing else " (yaml)"))
+              + (" (auto for >8f single-GPU)" if not gradient_checkpointing else " (yaml)"))
 
     if scale_lr:
         learning_rate = (
@@ -297,7 +297,7 @@ def main(
     gA = grid_sizeH * grid_sizeW
     n_pad = (-n_real) % gA
     if n_pad:
-        print(f'[tune] 帧数 {n_real} 非 {gA} 整数倍，复制末帧补齐到 {n_real + n_pad}')
+        print(f'[tune] frame count {n_real} not a multiple of {gA}; padded by repeating last frame to {n_real + n_pad}')
         pixel_values = torch.cat([pixel_values, pixel_values[:, :, -1:, :, :].expand(-1, -1, n_pad, -1, -1)], dim=2)
     pixel_values = grid.combine_frames_in_grid(pixel_values, grid_sizeH,grid_sizeW)
     pixel_values = rearrange(pixel_values, "b c f h w -> b f c h w")
@@ -335,8 +335,8 @@ def main(
     progress_bar.set_description("Steps")
     if torch.cuda.device_count()>1:
         assert dist.is_available() and dist.is_initialized() and dist.get_world_size() == 2, \
-            "多卡 tune 只支持 accelerate launch --num_processes=2（alternate_multiGPU 按双卡设计）"
-        print("启用静态图")
+            "multi-GPU tune only supports accelerate launch --num_processes=2 (alternate_multiGPU is designed for 2 GPUs)"
+        print("Enabling static graph")
         unet._set_static_graph()
     for epoch in range(first_epoch, num_train_epochs):
         unet.train()
