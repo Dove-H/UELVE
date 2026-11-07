@@ -39,7 +39,7 @@ def run(edit_config, dataset_config):
             # edit_config_now['editing_config']['source_prompt'] = Omegadict_dataset_config[data_sample]['eq_params']
             
             
-            # if 'logdir' not in edit_config_now:
+            # if 'logdir' not in edit_config_now :
             logdir = edit_config.replace('config', 'result').replace('.yml', '').replace('.yaml', '')+f'_config_{p2p_config_index}'+f'_{os.path.basename(dataset_config)[:-5]}'+f'_{dataset_time_string}'
             logdir +=  f"/{data_sample}"            
             edit_config_now['logdir'] = logdir

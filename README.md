@@ -62,7 +62,7 @@ pip install -r requirements.txt
 
 Each editing case is defined by a YAML config (video path, source/target prompts, grid
 size, method, etc., see `config/edit/` for examples). Set `pretrained_model_path` in the
-config to your local [Stable Diffusion v1.5](https://huggingface.co/runwayml/stable-diffusion-v1-5) checkpoint, then run:
+config to your local [Stable Diffusion v1.5](https://huggingface.co/runwayml/stable-diffusion-v1-5) checkpoint, then run :
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python test_fatezero.py --config config/edit/wolf.yaml
