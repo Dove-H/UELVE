@@ -311,7 +311,6 @@ class CrossAttnDownBlock3D(nn.Module):
             self.downsamplers = None
 
         self.gradient_checkpointing = False
-    #training参数区分tuning还是inference或者Inversion
     def forward(self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None,indices=[]):
         # TODO(Patrick, William) - attention mask is not used
         output_states = ()

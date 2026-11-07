@@ -37,7 +37,7 @@ class P2pSampleLogger:
         use_inversion_attention: bool = True,
         source_prompt: str = None,
         traverse_p2p_config: bool = False,
-        controlnet_conditioning_scale: float = 1.0,  # 添加ControlNet参数
+        controlnet_conditioning_scale: float = 1.0,
         **args
     ) -> None:
         self.editing_prompts = editing_prompts
@@ -68,7 +68,7 @@ class P2pSampleLogger:
         latents: torch.FloatTensor = None,
         uncond_embeddings_list: List[torch.FloatTensor] = None,
         save_dir = None,
-        control_image: torch.FloatTensor = None,  # 添加控制图像参数
+        control_image: torch.FloatTensor = None,
     ):
         torch.cuda.empty_cache()
         samples_all = []
@@ -133,8 +133,6 @@ class P2pSampleLogger:
                 if len(attention_all) > 0:
                     save_gif_mp4_folder_type(attention_all, save_path.replace('.gif', 'atten.gif'))
         return samples_all
-
-
 
 
 def tensor_to_numpy(image, b=1):

@@ -29,7 +29,6 @@ $(document).ready(function() {
 
     });
 
-    // 长视频轮播:多组长视频,可循环手动切换,不自动跳(每段都是完整循环播放的视频)
     bulmaCarousel.attach('#longvideo-carousel', {
         slidesToScroll: 1,
         slidesToShow: 1,
@@ -38,7 +37,6 @@ $(document).ready(function() {
         autoplay: false,
     });
 
-    // 分组小轮播:各显示 1 张(提示词条 + 对比 GIF),每 5 秒自动切换
     var groupOptions = {
         slidesToScroll: 1,
         slidesToShow: 1,

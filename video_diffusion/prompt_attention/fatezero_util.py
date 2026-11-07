@@ -1,17 +1,3 @@
-"""
-FateZero 模式（重构版）编辑期控制器。
-
-以原始 FateZero 的 attention_util.py 为基础（AttentionReplace/Refine/Reweight、
-cross 重替换 + alpha 加权、self 窗口重放 + blend mask、latent blend），差异点：
-
-1. 重放数据来自 ReplayProvider 的 (step, grid) 分片，配对关系固定为
-   编辑步 i ↔ 反演步 N-1-i（时间步对应是反的）。
-2. temporal attention 不做任何重放：原版 FateZero 的 register 本就跳过 attn_temporal
-   （其 to_out 零初始化，zero-shot 下为恒等映射）；one-shot（tune 后）attn_temp 已微调，
-   同样让它自由前向。两种模式统一为"不接管"。
-3. cross 重替换按 alpha>0 跳过零权重步（与裁剪存储严格镜像）。
-4. 编辑侧只记录 cross（latent blend 的 mask 需要），不再记录无消费方的 self。
-"""
 
 from typing import Optional, Union, Tuple, List, Dict
 import abc
@@ -44,12 +30,6 @@ class EmptyControl:
 
 def compute_need_steps(prompts, num_steps, cross_replace_steps, self_replace_steps,
                        blend_latents, tokenizer, latent_replace_steps=(0.2, 0.8)) -> dict:
-    """计算反演期需要存储的步集合（编辑消费的精确镜像）。
-
-    编辑步 i 消费：cross replace（alpha[i]>0 时）、self 重放（self_replace 窗口内，
-    其 blend mask 也读同步 cross）、latent blend（窗口内，读同步步 latent + cross）。
-    对应反演步 = N-1-i。
-    """
     alpha = ptp_utils.get_time_words_attention_alpha(prompts, num_steps, cross_replace_steps, tokenizer)
     cross_edit = {t for t in range(num_steps) if float(alpha[t].max()) > 0}
 
@@ -59,7 +39,6 @@ def compute_need_steps(prompts, num_steps, cross_replace_steps, self_replace_ste
 
     lat_edit = set()
     if blend_latents:
-        # SpatialBlender 的 latent blend 窗口（yaml 可配 latent_replace_steps，标量 x 视为 (0, x)）
         if isinstance(latent_replace_steps, (int, float)):
             latent_replace_steps = (0.0, float(latent_replace_steps))
         s_win, e_win = int(latent_replace_steps[0] * num_steps), int(latent_replace_steps[1] * num_steps)
@@ -74,10 +53,8 @@ def compute_need_steps(prompts, num_steps, cross_replace_steps, self_replace_ste
 
 
 class AttentionControlEdit(AttentionControl, abc.ABC):
-    """编辑期控制器：cross 重替换 + self 窗口重放 + latent/self blend。"""
 
     def begin_edit_step(self, edit_step: int):
-        """编辑循环每步开头调用：设定当前编辑步与其配对的反演步。"""
         self.cur_step = edit_step
         self.cur_att_layer = 0
         assert self.use_inversion_attention, "重构版 FateZero pipeline 仅支持 use_inversion_attention=True"
@@ -85,7 +62,6 @@ class AttentionControlEdit(AttentionControl, abc.ABC):
         self._step_shards = []
 
     def begin_grid(self, grid_idx: int):
-        """每个网格的 UNet 调用前调用：重置层位置计数，取本网格重放分片。"""
         self.cur_grid_idx = grid_idx
         self.attention_position_counter_dict = {k: 0 for k in _KEYS}
         if self.replay_provider is not None and self.replay_provider.has_shard(self._store_step):
@@ -95,14 +71,12 @@ class AttentionControlEdit(AttentionControl, abc.ABC):
             self.cur_shard = None
 
     def step_callback(self, x_t):
-        """整步网格处理完后调用：latent blend + 编辑侧 cross 累计。"""
         if self.latent_blend is not None and self.replay_provider is not None \
                 and self.replay_provider.has_latent(self._store_step):
             x_t_device, x_t_dtype = x_t.device, x_t.dtype
             inverted_latents = self.replay_provider.get_latent(self._store_step)
             inverted_latents = inverted_latents.to(device=x_t_device, dtype=x_t_dtype)
 
-            # 反演侧 cross：本步全部网格按序展平（与旧版 grid-major 展平语义一致）
             inv_flat = {
                 key: [entry for shard in self._step_shards for entry in shard.get(key, [])]
                 for key in ("down_cross", "mid_cross", "up_cross")
@@ -116,9 +90,6 @@ class AttentionControlEdit(AttentionControl, abc.ABC):
             x_t = self.latent_blend(x_t=torch.cat([inverted_latents, x_t], dim=0),
                                     attention_store=blend_dict)[1:, ...]
         elif self.latent_blend is not None:
-            # 该步没有配对的反演 latent（窗口外）也要推进 blend 计数：
-            # SpatialBlender 内部按 counter 判定 blend 窗口（counter = 编辑步序），
-            # 漏加会让窗口整体后移、前段 blend 步丢失（对齐 main-3 每步调用的语义）
             self.latent_blend.counter += 1
         self.between_steps()
         return x_t
@@ -144,7 +115,6 @@ class AttentionControlEdit(AttentionControl, abc.ABC):
     def forward(self, attn, is_cross: bool, place_in_unet: str):
         key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
         if attn.shape[-2] <= ATTN_MAX_TOKENS:
-            # 编辑侧只记录 cross（latent blend mask 的编辑分支输入）
             if is_cross:
                 self.step_store[key].append(attn.detach())
 
@@ -176,7 +146,6 @@ class AttentionControlEdit(AttentionControl, abc.ABC):
                         mask = self.attention_blend(target_h=h, target_w=w,
                                                     attention_store=self.cur_shard,
                                                     step_in_store=self._store_step)
-                        # cross 掩码携带当前网格的 grid_sizeH*grid_sizeW 帧，组回网格布局
                         _g = self.grid_sizeH * self.grid_sizeW
                         mask = mask[:, :_g].unsqueeze(1)
                         if mask.numel() > 0:
@@ -185,12 +154,10 @@ class AttentionControlEdit(AttentionControl, abc.ABC):
                     attn[0:] = self.replace_self_attention(attn_base, attn_replace, reshaped_mask)
                     attn = attn.reshape(self.batch_size * clip_length, *attn.shape[2:])
             else:
-                # 分片中无此层（理论上不应发生）：只推进计数保持对齐
                 self.update_attention_position_dict(key)
         return attn
 
     def between_steps(self):
-        # 原版别名累加：首步引用赋值，其后逐步累加（latent blend mask 用编辑侧累计 cross）
         if len(self.attention_store) == 0:
             self.attention_store = self.step_store
         else:
@@ -288,7 +255,6 @@ class AttentionRefine(AttentionControlEdit):
 
 
 class AttentionReweight(AttentionControlEdit):
-    """先替换权重，再增强特定词的区域注意力。"""
 
     def replace_cross_attention(self, attn_base, att_replace):
         if self.prev_controller is not None:
@@ -334,7 +300,6 @@ def make_controller(tokenizer, prompts: List[str], is_replace_controller: bool,
         attention_blend = None
     else:
         if blend_latents:
-            # latent blend 时间窗口：标量 x 视为 (0, x)；列表/元组 [a, b] 原样使用（比例，乘以总步数）
             if isinstance(latent_replace_steps, (int, float)):
                 latent_replace_steps = (0.0, float(latent_replace_steps))
             start_blend, end_blend = float(latent_replace_steps[0]), float(latent_replace_steps[1])

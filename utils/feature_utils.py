@@ -44,7 +44,6 @@ def prepare_key_grid_latents(latents_video, latent_grid_size=[2,2], key_grid_siz
     # ts = torch.cat([long_flatten[:,:,:,ind*(img_w):(ind+1)*(img_w)] for ind in rand_indices], dim=-1)
     # print('len(lt):',len(lt))
     # print('lt[0].shape:',lt[0].shape)
-    # print('ts.shape:',ts.shape)    # ts.shape:torch.Size([1, 4, 64, 576]),分2个批次，一次处理9帧。
     keyframe_grid = unflatten_grid(torch.cat([long_flatten[:,:,:,ind*(img_w):(ind+1)*(img_w)] for ind in rand_indices], dim=-1), key_grid_size)
     #keyframe_grid.shape:[1, 4, 192, 192]
     return keyframe_grid, rand_indices

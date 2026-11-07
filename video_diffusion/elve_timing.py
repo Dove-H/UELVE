@@ -1,8 +1,3 @@
-"""
-ELVE_TIMING=1 环境变量开启的耗时累计器：分桶累计多卡通信（nccl init/broadcast/
-send/recv/barrier）与 inversion 特征换入换出（D2H/落盘写/预取读/主线程等待/H2D）。
-关闭时 add/timer 为近零开销空操作，不影响常规基准计时。
-"""
 import json
 import os
 import threading
@@ -28,7 +23,6 @@ def add(key, dt, nbytes=0):
 
 
 def add_bytes(key, nbytes):
-    """只累计数据量不记次数（配合 timer 使用，避免 n 被重复计数）。"""
     if not ENABLED or not nbytes:
         return
     with _lock:

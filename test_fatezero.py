@@ -6,9 +6,6 @@ import shutil
 import warnings
 warnings.filterwarnings("ignore")
 
-# 端到端计时起点：紧跟指令启动、在 torch 等重依赖 import 之前打点，
-# use_time_EndToEnd 因此覆盖 模块加载 -> DeepSeek 路由 -> (motion: 补训+推理+复制
-# / 其他: 反演+去噪+保存) 的全程，与 test() 内的分段 [TIMING] 口径衔接。
 _T_E2E_START = time.time()
 
 from glob import glob
@@ -17,8 +14,6 @@ from omegaconf import OmegaConf
 import click
 import json
 import subprocess
-# 裸 python 启动且未指定 GPU 时，默认只用物理 GPU0（须在 torch 导入前设置），
-# 避免多卡机器上误入 torch.distributed 路径；accelerate 多卡启动（有 RANK/LOCAL_RANK）不受影响
 if ('CUDA_VISIBLE_DEVICES' not in os.environ
         and not {'RANK', 'LOCAL_RANK', 'WORLD_SIZE'} & set(os.environ)):
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -57,12 +52,7 @@ import utils.image_process_utils as ipu
 import utils.feature_utils as fu
 
 
-# diffusers 路径管理函数
 def setup_diffusers_path(method):
-    """根据 method 参数设置不同的 diffusers 路径。
-    FateZero 直接用 ELVE env pip 装的 0.11.1（旧 diffusersF 目录与之逐字节一致，已删）；
-    MotionEditor 走独立 env（0.15.1）的外部进程，本进程不切 fork；
-    仅 ControlNet 需要切换到 env 外的本地 0.18.2（diffusersC）。"""
     if method == "ControlNet":
         local_diffusers_path = '/mnt/fspace/hproject/ELVE/diffusersC/'
     elif method in ("FateZero", "MotionEditor"):
@@ -75,7 +65,6 @@ def setup_diffusers_path(method):
     return local_diffusers_path
 
 def clear_diffusers_cache():
-    """只清理 diffusers 和 transformers 相关模块缓存，不清理 torch"""
     modules_to_remove = []
     for module_name in list(sys.modules.keys()):
         if (module_name.startswith('diffusers') or 
@@ -85,15 +74,11 @@ def clear_diffusers_cache():
     for module_name in modules_to_remove:
         del sys.modules[module_name]
 
-    # diffusers 被驱逐后会整体重新初始化，新的日志模块会往持久存在的 'diffusers'
-    # logger 上再挂一个 StreamHandler（logging 的 logger 不随 sys.modules 清除），
-    # 不摘掉旧 handler 的话所有 diffusers 警告都会在终端打印两遍。
     import logging
     logging.getLogger('diffusers').handlers.clear()
 
 @contextmanager
 def diffusers_context(method):
-    """diffusers 版本切换的上下文管理器"""
     local_diffusers_path = setup_diffusers_path(method)
     clear_diffusers_cache()
 
@@ -104,24 +89,12 @@ def diffusers_context(method):
 
 
 # ============================================================
-# LLM 语义分析与模型适配路由（论文 Sec 3.3 / Figure 3）：
-# pipeline 启动前，由 LLM 对比 source/target prompt 流式输出决策。
-# model_adaption 前置 -> 不等 Thinking 生成完即可路由：
-#   zero-shot                  -> 不跑 tune，直接加载预训练模型
-#   one-shot(temporal module)  -> 自主启动 tune，跑完加载微调后的模型文件
-#   one-shot(Motion module)    -> 启动外置 MotionEditor 模块
 # ============================================================
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PRETRAINED = "/mnt/fspace/hproject/model/stable-diffusion-v1-5"
-# MotionEditor 独立 conda env（py3.10 + diffusers 0.15.1），与 ELVE env 隔离，
-# 用绝对路径调用以避开 PATH 被 ELVE env 劫持的问题
 MOTIONEDITOR_PYTHON = "/home/user4/miniconda3/envs/motioneditor/bin/python3.10"
 TUNE_DONE_MARKER = "tune_done.marker"
 
-# 外层 accelerate launch 注入的分布式环境变量。嵌套启动的单进程子任务（tune /
-# MotionEditor）若继承它们，其 Accelerator 会按环境变量误判自己处于多进程
-# MULTI_GPU 世界（还会去连父进程的 master 端口），单卡执行卡死在第一次集合通信
-# ——即使显式传了 --num_processes=1 也拦不住（子进程读的是环境变量）。
 _DIST_ENV_KEYS = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE", "GROUP_RANK",
                   "MASTER_ADDR", "MASTER_PORT", "TORCHELASTIC_RUN_ID",
                   "TORCHELASTIC_RESTART_COUNT", "TORCHELASTIC_ERROR_FILE",
@@ -130,8 +103,6 @@ _DIST_ENV_KEYS = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE", "GROUP
 
 
 def _subproc_env_single_gpu():
-    """给单卡子任务（MotionEditor / 单进程 ELVE 下的 tune）构造干净环境：
-    剥离外层分布式变量 + CUDA_VISIBLE_DEVICES 收敛为单卡首卡。"""
     env = dict(os.environ)
     for k in _DIST_ENV_KEYS:
         env.pop(k, None)
@@ -141,11 +112,6 @@ def _subproc_env_single_gpu():
 
 
 def _subproc_env_multi_gpu():
-    """双卡 ELVE 下的 tune 子进程环境：同样剥离外层分布式变量（避免嵌套
-    accelerate 继承父进程的 rendezvous 地址、误连父进程组），但保留全部
-    可见 GPU——run_tuning_1.py 按 torch.cuda.device_count() 走多卡分支
-    （_set_static_graph / alternate_multiGPU），数据集也按可见卡数分帧
-    （TuneAVideoDataset 的 GPU_num），必须所有卡可见 + 分布式启动。"""
     env = dict(os.environ)
     for k in _DIST_ENV_KEYS:
         env.pop(k, None)
@@ -153,23 +119,15 @@ def _subproc_env_multi_gpu():
 
 
 def _pick_free_port():
-    """给嵌套 accelerate launch 选空闲端口：父进程已占默认 rendezvous 端口，
-    嵌套的多进程启动若不换端口会连到父进程组上。"""
     import socket
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
-# 动作编辑路由标记：target prompt 尾部的 （case-N）。source/target 文本可能完全相同
-# （如 "a girl is dancing" -> "a girl is dancing（case-1）"），仅凭语义 LLM 分不清是
-# 动作编辑；该标记既告诉路由这是动作编辑（-> one-shot(Motion module)），又指定使用
-# 哪套 MotionEditor case 资产（原视频/目标视频/yaml 全套来自该 case）。
 _MOTION_CASE_RE = re.compile(r'[（(]\s*case[-_]?\s*([0-9A-Za-z][0-9A-Za-z_-]*)\s*[)）]', re.IGNORECASE)
 
 
 def _is_main_process():
-    """多进程(accelerate launch)时仅 RANK/LOCAL_RANK=0 做 LLM 决策与 tune，
-    其余进程读它写进 yaml 的决策并等待微调产物；单进程直跑时恒为 True。"""
     for var in ("RANK", "LOCAL_RANK", "SLURM_PROCID"):
         if var in os.environ:
             return int(os.environ[var]) == 0
@@ -177,8 +135,6 @@ def _is_main_process():
 
 
 def classify_adaption(adaption):
-    """把 model_adaption 文本归一化为三种路由之一：
-    'motion' | 'temporal' | 'zero-shot'（对应论文 Figure 3a 的三种模型适配）。"""
     text = str(adaption or "").lower().replace(" ", "")
     if "one-shot(motionmodule)" in text:
         return "motion"
@@ -188,12 +144,10 @@ def classify_adaption(adaption):
 
 
 def is_no_mask(adaption):
-    """model_adaption 的掩码部分是否为 no-mask（全局编辑，无局部 mask）。"""
     return "no-mask" in str(adaption or "").lower().replace(" ", "")
 
 
 def _read_llm_decision(yaml_path):
-    """从 yaml 读 llm_decision 块；不存在/解析失败（rank0 正在改写）返回 None。"""
     try:
         d = OmegaConf.load(yaml_path).get("llm_decision", None)
     except Exception:
@@ -202,7 +156,6 @@ def _read_llm_decision(yaml_path):
 
 
 def _strip_llm_decision(yaml_path):
-    """整块删掉 yaml 里的 llm_decision（rank0 开新一轮决策前清场，不留占位值）。"""
     with open(yaml_path) as f:
         text = f.read()
     new_text = re.sub(r'(?ms)^llm_decision:.*?(?=^\S|\Z)', '', text).rstrip() + '\n'
@@ -212,13 +165,8 @@ def _strip_llm_decision(yaml_path):
 
 
 def _write_llm_decision(yaml_path, adaption, paradigm):
-    """把 rank0 的 LLM 决策写进编辑 yaml 本身（不另立文件）。
-
-    只替换文件里的 llm_decision 块、原样保留其余内容与注释；written_at 时间戳
-    供其余进程拒绝上一轮运行留下的旧决策。
-    """
     _strip_llm_decision(yaml_path)
-    block = (f"llm_decision:  # 自动写入：多卡时 rank0 的 DeepSeek 决策（重跑会覆盖；Use_DeepSeek=False 时忽略）\n"
+    block = (f"llm_decision:  # auto-written by rank0's DeepSeek decision in multi-GPU runs (overwritten on rerun; ignored when Use_DeepSeek=False)\n"
              f"  adaption: '{adaption}'\n"
              f"  paradigm: {paradigm}\n"
              f"  written_at: {time.time()}\n")
@@ -227,7 +175,6 @@ def _write_llm_decision(yaml_path, adaption, paradigm):
 
 
 def _wait_for_file(path, timeout_s, what, fresh_after=None):
-    """轮询等待文件出现并返回其内容；fresh_after 用于拒绝上一轮运行留下的旧文件。"""
     t0 = time.time()
     while True:
         if os.path.exists(path) and os.path.getmtime(path) >= (fresh_after or 0):
@@ -239,10 +186,6 @@ def _wait_for_file(path, timeout_s, what, fresh_after=None):
 
 
 def _find_tune_yaml(dataset_path):
-    """按数据集路径在 config/tune/ 下自动匹配 tune 配置（train_data.video_path 一致即命中）。
-
-    免去编辑配置里手填 tune-yaml；匹配不到时给出明确指引。
-    """
     from glob import glob as _glob
     want = os.path.normpath(os.path.join(PROJECT_ROOT, str(dataset_path)))
     for cand in sorted(_glob(os.path.join(PROJECT_ROOT, "config", "tune", "*.yaml"))):
@@ -262,17 +205,9 @@ def _find_tune_yaml(dataset_path):
 
 
 def run_tune(tune_config_path):
-    """阶段2：one-shot(temporal module) —— 自主启动 tune（微调膨胀后的时空注意力，
-    论文 Sec 3.3 "if a big shape change occurs, UELVE just finetunes the inflated
-    spatial-temporal attention"）。跑完返回微调模型目录，pipeline 直接加载它。
-
-    run_tuning_1.py 结束时会将完整 pipeline（含微调后的 unet）save_pretrained 到
-    tune yaml 的 output_dir；沿用 read.sh 的启动方式（accelerate launch）。
-    """
     tune_cfg = OmegaConf.load(tune_config_path)
     output_dir = tune_cfg["output_dir"]
     if not os.path.isabs(output_dir):
-        # tune yaml 内的相对路径以项目根目录为基准
         output_dir = os.path.join(PROJECT_ROOT, output_dir)
     output_dir = os.path.normpath(output_dir)
     done_marker = os.path.join(output_dir, TUNE_DONE_MARKER)
@@ -281,10 +216,6 @@ def run_tune(tune_config_path):
         print(f"[tune] 已存在微调模型 {output_dir}，跳过 tune（如需重训请删除该目录）")
     else:
         accelerate_bin = os.path.join(os.path.dirname(sys.executable), "accelerate")
-        # tune 的卡数跟随 ELVE 的启动方式：双卡 ELVE（accelerate launch
-        # --num_processes=2）-> 双卡 tune（数据集分帧 + alternate_multiGPU
-        # 跨 rank 换片）；单进程 ELVE -> 固定单卡。两种情况下都必须剥离外层
-        # accelerate 的分布式环境变量；多进程嵌套启动还要另选 rendezvous 端口。
         world = int(os.environ.get("WORLD_SIZE", "1") or 1)
         if world > 1:
             env = _subproc_env_multi_gpu()
@@ -300,7 +231,6 @@ def run_tune(tune_config_path):
             if n_proc > 1:
                 launcher.append(f"--main_process_port={_pick_free_port()}")
         elif n_proc > 1:
-            # 多卡 tune 必须分布式启动（单进程+多卡可见会走 _set_static_graph 崩溃）
             raise SystemExit(f"[tune] 多卡 tune 需要 accelerate launch，未找到: {accelerate_bin}")
         else:
             launcher = [sys.executable]
@@ -310,25 +240,13 @@ def run_tune(tune_config_path):
         subprocess.run(cmd, check=True, cwd=PROJECT_ROOT, env=env)
         assert "unet" in os.listdir(output_dir), \
             f"tune 结束但 {output_dir} 下没有 unet/，微调产物不完整"
-    with open(done_marker, "w") as f:  # 供其余 GPU 进程判断 tune 已完成
+    with open(done_marker, "w") as f:
         f.write(tune_config_path)
     print(f"[tune] 微调完成，pipeline 将加载微调后模型: {output_dir}")
     return output_dir
 
 
 def launch_motioneditor(me_config=None):
-    """阶段3：one-shot(Motion module) —— MotionEditor 全自动流水线。
-
-    DeepSeek 路由到 motion 并给出 case 后，后续操作全部自动执行，无需人工干预：
-      1. 检查数据资产（原视频/姿态条件是用户提供的，无法自动补齐，缺失即报错）；
-      2. 检查两级训练产物——背景微调 checkpoint（train_bg.py）与 adapter
-         （train_adaptor.py），缺哪级补训哪级；背景重训时 adapter 必须跟着重训
-         （它以 one_stage_checkpoint 的背景模型为条件）；
-      3. 跑推理（inference.py，null-text inversion + 采样）；
-      4. 把结果从 MotionEditor/outputs/ 复制到 ELVE/result/ 方便用户直接查看。
-    MotionEditor 是独立代码库（py3.10 + diffusers 0.15.1 的 conda env），
-    用子进程 + 绝对解释器路径启动；yaml 内的相对路径以 MotionEditor 根目录为基准。
-    """
     me_root = os.path.join(PROJECT_ROOT, "MotionEditor")
     me_config = me_config or os.path.join("configs", "case-4", "eval-motion.yaml")
     me_config_abs = me_config if os.path.isabs(me_config) else os.path.join(me_root, me_config)
@@ -338,17 +256,14 @@ def launch_motioneditor(me_config=None):
             f"  请检查 motioneditor-yaml 字段或 target prompt 里的 case 标记是否写对了")
     eval_cfg = OmegaConf.load(me_config_abs)
 
-    def _me_abs(p):  # MotionEditor yaml 内的相对路径以 me_root 为基准
+    def _me_abs(p):
         return p if os.path.isabs(str(p)) else os.path.normpath(os.path.join(me_root, str(p)))
 
     def _me_run(script, cfg_rel, hint):
         cmd = [MOTIONEDITOR_PYTHON, script, f"--config={cfg_rel}"]
         print(f"[MotionEditor] {hint}: {' '.join(cmd)}  (cwd={me_root})")
-        # 同 tune：剥离外层分布式环境变量 + 收敛单卡（双卡 ELVE 的 motion 路由下，
-        # MotionEditor 的 Accelerator 同样会被继承的 RANK/WORLD_SIZE 误导入多进程世界）
         subprocess.run(cmd, cwd=me_root, check=True, env=_subproc_env_single_gpu())
 
-    # 1) 数据资产：源视频/条件图是用户提供的原始素材，缺失只能报错
     video_dir = _me_abs(eval_cfg["input_data"]["video_dir"])
     if not os.path.isdir(video_dir):
         raise SystemExit(
@@ -356,7 +271,6 @@ def launch_motioneditor(me_config=None):
             f"  原视频/姿态条件无法自动补齐，请先按 case 数据集结构准备 "
             f"（images/ source_condition/ target_condition/ frame_list.txt 等）")
 
-    # 2) 训练产物自检 + 自动补训（train 配置与 eval 配置同目录）
     bg_ckpt = _me_abs(eval_cfg["resume_from_checkpoint"])
     adapter_pth = _me_abs(eval_cfg["adapter_weight_path"])
     bg_missing = not (os.path.isdir(bg_ckpt)
@@ -367,14 +281,14 @@ def launch_motioneditor(me_config=None):
               f"  背景 checkpoint: {bg_ckpt}\n"
               f"  adapter 权重:    {adapter_pth}\n  直接推理")
     else:
-        case_dir = os.path.dirname(me_config)  # 如 configs/case-1
+        case_dir = os.path.dirname(me_config)
         train_yamls = {"train_bg.py": os.path.join(case_dir, "train-bg.yaml"),
                        "train_adaptor.py": os.path.join(case_dir, "train-motion.yaml")}
         need = []
         if bg_missing:
-            need.append("train_bg.py")                       # 背景缺失 -> 补训背景
+            need.append("train_bg.py")
         if bg_missing or ad_missing:
-            need.append("train_adaptor.py")                  # adapter 缺失，或背景重训后必须跟着重训
+            need.append("train_adaptor.py")
         for script in need:
             yml_abs = train_yamls[script] if os.path.isabs(train_yamls[script]) \
                 else os.path.join(me_root, train_yamls[script])
@@ -385,10 +299,8 @@ def launch_motioneditor(me_config=None):
                   f" 缺失/失效 -> 自动补训（约 5 分钟/级）")
             _me_run(script, train_yamls[script], f"自动补训 {script}")
 
-    # 3) 推理
     _me_run("inference.py", me_config, "one-shot(Motion module) 推理")
 
-    # 4) 结果复制到 ELVE/result/（覆盖旧拷贝，MotionEditor/outputs 原产物保留）
     out_dir = _me_abs(eval_cfg["output_dir"])
     if not os.path.isdir(out_dir):
         raise SystemExit(f"[MotionEditor] 推理结束但输出目录不存在: {out_dir}")
@@ -401,7 +313,6 @@ def launch_motioneditor(me_config=None):
 
 
 def _extract_motion_case(Omegadict):
-    """从 editing_prompts 里提取 MotionEditor case 标记（（case-1） 等），返回 case 名或 None。"""
     prompts = Omegadict.get("editing_config", {}).get("editing_prompts", []) or []
     for p in prompts:
         m = _MOTION_CASE_RE.search(str(p))
@@ -411,26 +322,10 @@ def _extract_motion_case(Omegadict):
 
 
 def llm_decision_routing(Omegadict, config):
-    """pipeline 启动前的 LLM 语义分析入口。
-
-    流式调用 DeepSeek（model_adaption 前置输出，不等 Thinking 生成完），
-    按解析结果决定模型配置，返回需要覆盖到 edit 配置上的字段 dict；
-    判定 one-shot(Motion module) 时直接启动外置 MotionEditor 并返回 None。
-
-    target prompt 尾部的 （case-N） 标记表示动作编辑（提示词 D4 已同步该约定）；
-    即使 LLM 误判也强制校正为 motion，并按 case 名选用 MotionEditor 对应资产。
-    """
     paradigm = None
-    adaption = None  # 掩码决策(no-mask/mask)随 paradigm 一起路由；no-mask 时降 memory_frames
+    adaption = None
     motion_case = _extract_motion_case(Omegadict)
-    # DeepSeek 决策仅在多 GPU（accelerate launch）时需要跨进程传递：所有 rank 同时
-    # 启动而决策要 ~1s 才返回，其余进程拿不到 rank0 的内存结果，改由 rank0 把决策
-    # 写进编辑 yaml 本身（llm_decision 块，不另立文件）。单进程不读也不写；
-    # Use_DeepSeek=False 时路由整体跳过，yaml 里残留的 llm_decision 块不会被读取。
     multi_proc = any(v in os.environ for v in ("RANK", "LOCAL_RANK", "SLURM_PROCID"))
-    # 临时测量开关（评测用）：ELVE_FORCE_PARADIGM=zero-shot|temporal|motion 时跳过
-    # DeepSeek 调用，直接按指定决策路由；各 rank 从同一环境变量读取，天然一致，
-    # 无需 yaml 交换。不设置时完全不影响正常 DeepSeek 流程。
     forced = os.environ.get("ELVE_FORCE_PARADIGM", "").strip().lower()
     if forced:
         if forced not in ("zero-shot", "temporal", "motion"):
@@ -438,7 +333,6 @@ def llm_decision_routing(Omegadict, config):
         print(f"[ELVE] ELVE_FORCE_PARADIGM={forced} 生效：跳过 DeepSeek，直接按该决策路由")
         paradigm = forced
     elif _is_main_process():
-        # 先整块清掉上一轮写进 yaml 的旧决策，避免其余进程读到
         if multi_proc:
             _strip_llm_decision(config)
         source_prompt = Omegadict["dataset_config"]["prompt"]
@@ -450,15 +344,13 @@ def llm_decision_routing(Omegadict, config):
                   f"LLM 判定为 {paradigm}，强制校正为 motion")
             paradigm = "motion"
             adaption = "no-mask, one-shot(Motion module)"
-        if multi_proc:  # 多 GPU 时同步给其余进程
+        if multi_proc:
             _write_llm_decision(config, adaption, paradigm)
     else:
-        # 轮询 yaml 里的 llm_decision 块；written_at 早于本轮启动的视为上一轮旧值
-        t_accept = time.time() - 30  # 30s 容忍 rank 间启动偏移
+        t_accept = time.time() - 30
         t0 = time.time()
         while True:
             d = _read_llm_decision(config)
-            # paradigm 缺失视为不完整块（rank0 正在写/手删残留），paradigm 保持 None 继续轮询
             if d and d.get("written_at", 0) >= t_accept and d.get("paradigm"):
                 paradigm = d["paradigm"]
                 adaption = d.get("adaption", "")
@@ -468,27 +360,16 @@ def llm_decision_routing(Omegadict, config):
             time.sleep(5)
 
     if paradigm == "motion":
-        # 阶段3：MotionEditor 为外置模块，启动后即返回，不进入 ELVE pipeline
         if _is_main_process():
             me_yaml = Omegadict.get("motioneditor-yaml", None)
             if me_yaml is None and motion_case is not None:
-                # case 标记指定资产：原视频/目标视频/yaml 全套来自该 case
                 me_yaml = os.path.join("configs", f"case-{motion_case}", "eval-motion.yaml")
             launch_motioneditor(me_yaml)
         return None
 
     overrides = {}
     if is_no_mask(adaption):
-        # no-mask（全局编辑）无局部掩码，self-attention 重放特征全帧驻留显存，
-        # 16f 单卡在去噪第一步即 OOM（实测已分配 22.55GiB）；降为分级存储：
-        # 单卡帧数 >8 落盘 + 预取，mask 模式仍保持全驻留（memory_frames=16）
         overrides["memory_frames"] = 8
-        # DeepSeek 判 no-mask 时禁用 mask 机制：把各 p2p_config 条目的 blend_words
-        # 覆盖为默认值 None（等效于在 yaml 里注释掉该行）——make_controller 里
-        # blend_words=None 不建 SpatialBlender，latent/self-attention blend 整体旁路，
-        # 反演期 need 镜像按同一开关降级（test() 的 _blender_on），预取不失配。
-        # DeepSeek 判 mask、或 Use_DeepSeek=False、或 ELVE_FORCE_PARADIGM 跳过
-        # DeepSeek 时，本分支不进入，blend_words 严格按 yaml 原值执行。
         p2p_entries = Omegadict.get("editing_config", {}).get("p2p_config", None) or {}
         if hasattr(p2p_entries, "keys") and len(p2p_entries):
             overrides["editing_config"] = {
@@ -497,9 +378,7 @@ def llm_decision_routing(Omegadict, config):
         print("[ELVE] no-mask(全局编辑)：memory_frames=8（特征分级存储，单卡超 8 帧落盘）；"
               "blend_words 置 None 禁用 mask 机制（yaml 原值不生效，等效注释）")
     if paradigm == "temporal":
-        # 阶段2：先自主跑 tune，再加载 tune 后的模型文件（本阶段固定走 FateZero 模式）
         overrides["method"] = "FateZero"
-        # tune 配置：显式 tune-yaml 优先；缺省按数据集路径在 config/tune/ 自动匹配
         tune_yaml = Omegadict.get("tune-yaml", None)
         if tune_yaml is None:
             tune_yaml = _find_tune_yaml(Omegadict["dataset_config"]["path"])
@@ -509,30 +388,23 @@ def llm_decision_routing(Omegadict, config):
             tune_output = OmegaConf.load(tune_yaml)["output_dir"]
             if not os.path.isabs(tune_output):
                 tune_output = os.path.join(PROJECT_ROOT, tune_output)
-            # 新鲜度锚定在本进程模块加载时刻（而非轮询时刻）：产物已存在时 rank0
-            # 会瞬时跳过训练并立刻重写 marker，若 rank1 import 较慢、开始轮询晚于
-            # rank0 的写入，按轮询时刻锚点会把新鲜 marker 误判为旧值而死等超时
             _wait_for_file(os.path.join(tune_output, TUNE_DONE_MARKER), timeout_s=4 * 3600,
                            what="rank0 的 tune 完成", fresh_after=_T_E2E_START - 5)
             tuned_dir = tune_output
         overrides["pretrained_model_path"] = tuned_dir
     else:
-        # zero-shot：无需 tune，直接加载默认预训练模型
         overrides["pretrained_model_path"] = DEFAULT_PRETRAINED
     return overrides
 
 
 def run_motioneditor(cfg):
-    """MotionEditor 推理：走独立 pipeline（pipeline_motion_editor），与 ELVE 的 fatezero/controlnet 不交叉。
-    MotionEditor 用标准 diffusers 0.15.1（setup_diffusers_path 不切 fork；diffusers_context 已 clear cache）。
-    在独立 accelerate launch 进程跑，与 ELVE 进程互不干扰。"""
     me_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'MotionEditor')
     orig_cwd = os.getcwd()
-    os.chdir(me_dir)  # MotionEditor 用相对路径（checkpoints/、data/），切到其目录
-    sys.path.insert(0, me_dir)  # 让 `from inference import main` / `import motion_editor` 找到
+    os.chdir(me_dir)
+    sys.path.insert(0, me_dir)
     try:
-        me_cfg = {k: v for k, v in dict(cfg).items() if k != 'method'}  # 去掉 ELVE 专属的 method 字段
-        import diffusers  # 确认拿到 pip 0.15.1（未切 fork）
+        me_cfg = {k: v for k, v in dict(cfg).items() if k != 'method'}
+        import diffusers
         print(f"[MotionEditor] diffusers = {diffusers.__file__}")
         from inference import main as me_main
         me_main(**me_cfg)
@@ -542,54 +414,34 @@ def run_motioneditor(cfg):
             sys.path.remove(me_dir)
 
 
-
 def control_preprocess(image_tensor, accelerator, controlnet, prepare_control_image,Control_image_path,control_class):
-    """
-    处理输入的四维张量，转换为PIL图像列表进行深度预处理
-    image_tensor: 形状为 (batch_size * frames, channels, height, width) 的张量
-    """
     if len(os.listdir(Control_image_path)) > 0:
                 control_torch = torch.load(os.path.join(Control_image_path, 'control.pt')).to(accelerator.device)
     else:
-        # 将张量转换为PIL图像列表
         image_pil_list = []
         
-        # 遍历张量中的每个图像
         for i in range(image_tensor.shape[0]):
-            # 获取单个图像张量 [C, H, W]
             img_tensor = image_tensor[i]
             
-            # 将张量从 [C, H, W] 转换为 [H, W, C]
             if img_tensor.dim() == 3:
                 img_tensor = img_tensor.permute(1, 2, 0)
             
-            # 转换为numpy数组并确保值范围在[0, 255]
             if img_tensor.max() <= 1.0:
                 img_array = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
             else:
                 img_array = img_tensor.cpu().numpy().astype(np.uint8)
             
-            # 转换为PIL图像
             pil_image = Image.fromarray(img_array)
             image_pil_list.append(pil_image)
         
         control_torch_list = []
-        # 遍历输入的PIL图像列表
         for image_pil in image_pil_list:
-            # 获取PIL图像的宽度和高度
             width, height = image_pil.size
-            # 对PIL图像进行预处理，生成控制图像
-            # 将一个PIL图像转换为一系列帧并放入帧列表，grid_size=[2,2]
             list_of_image_pils = fu.pil_grid_to_frames(image_pil, grid_size=[2,2]) # List[C, W, H] -> len = num_frames
-            # 对每个帧进行像素完美处理，处理方式由self.preprocess_name指定
             list_of_pils = [pu.pixel_perfect_process(np.array(frame_pil, dtype='uint8'), control_class) for frame_pil in list_of_image_pils]
-            # 将处理后的帧列表转换为numpy数组
             control_images = np.array(list_of_pils)
-            # 从numpy数组创建一个新的网格（四合一的大numpy向量），网格大小由self.grid决定
             control_img = ipu.create_grid_from_numpy(control_images, grid_size=[2,2])
-            # 将网格转换为灰度图像
             control_pil = PIL.Image.fromarray(control_img).convert("L")
-            # 根据控制图像、宽度和高度准备控制图像
             control_image = prepare_control_image(
                 image=control_pil,
                 width=width,
@@ -599,13 +451,10 @@ def control_preprocess(image_tensor, accelerator, controlnet, prepare_control_im
                 batch_size=1,
                 num_images_per_prompt=1
             )
-            # 将控制图像添加到控制图像列表中
             control_torch_list.append(control_image)
 
-        # 将控制图像列表中的torch张量按行拼接，并移动到指定设备上
         control_torch = torch.cat(control_torch_list, dim=0).to(accelerator.device)
         torch.save(control_torch, os.path.join(Control_image_path, 'control.pt'))
-        # 深度图构建完成，释放 annotator 显存给后续 ControlNet 生成
         pu.unload_preprocess_models()
         print("control_torch.shape=",control_torch.shape)
     return control_torch
@@ -614,7 +463,6 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
                test_pipeline_config, video_length, accelerator, data_path, num_inference_steps, device,control_class,
                memory_frames: int = 16):
     
-    # 动态导入 diffusers 相关模块
     import diffusers
     from diffusers import AutoencoderKL, DDIMScheduler
     from diffusers.utils.import_utils import is_xformers_available
@@ -626,7 +474,6 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
         weight_dtype = torch.bfloat16
 
     if method == "FateZero":
-        # FateZero的模型初始化
         from video_diffusion.models.unet_3d_condition import UNet3DConditionModel
         if accelerator.is_main_process: 
             print("pretrained_model_path=",pretrained_model_path)
@@ -676,7 +523,6 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
         )
 
     elif method == "ControlNet":
-        # ControlNet的模型初始化
         print("ControlNet Model Path",const.PREPROCESSOR_DICT[control_class])
         from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
         controlnet = ControlNetModel.from_pretrained(
@@ -735,11 +581,6 @@ def init_model(pretrained_model_path, method, grid_sizeH, grid_sizeW, model_conf
 
 
 def _save_edited_only_gif(logdir, step=0, idx=0):
-    """把纯编辑帧单独拼成 step1_edited.gif（不含原视频帧的拼接网格）。
-
-    数据源是各卡 logger 写的 step_{step}_{idx}_{0}_GPU{r}.gif（每卡只有自己那份帧、
-    且是纯编辑结果），按 GPU 序号顺序拼接即得全视频。单双卡（任意卡数）通用：
-    单卡时就是 GPU0 序列的归一化换名。"""
     sample_dir = os.path.join(logdir, 'sample')
     per_gpu = []
     for p in glob(os.path.join(sample_dir, f'step_{step}_{idx}_0_GPU*.gif')):
@@ -765,7 +606,6 @@ def _save_edited_only_gif(logdir, step=0, idx=0):
     if not frames_all:
         print(f"[ELVE] 未找到纯编辑帧 gif（step_{step}_{idx}_0_GPU*.gif），跳过 edited 拼接")
         return
-    # 与拼接网格版 step1.gif 配对命名
     out = os.path.join(sample_dir, 'step1_edited.gif')
     frames_all[0].save(out, save_all=True, append_images=frames_all[1:],
                        loop=0, duration=duration)
@@ -788,10 +628,9 @@ def test(
     batch_size: int = 1,
     model_config: dict = {},
     verbose: bool = True,
-    memory_frames: int = 16,   # FateZero 特征驻留阈值；LLM 路由 no-mask 时降为 8
+    memory_frames: int = 16,
     **kwargs
 ):
-    # 使用上下文管理器设置 diffusers 环境
     with diffusers_context(method):
         import diffusers
         #print("________________", diffusers.__file__)
@@ -800,8 +639,6 @@ def test(
     args = get_function_args()
     grid_sizeH = editing_config["grid_sizeH"]
     grid_sizeW = editing_config["grid_sizeW"]
-    # method 与 pipeline target 一致性自动校正：method 是唯一开关，target 配错时自动切到
-    # 对应 pipeline（两个构造器均 **kwargs 兼容，参数残留无害；DeepSeek 路由覆盖 method 后同样生效）
     _target = test_pipeline_config.get("target", "") if test_pipeline_config else ""
     if method == "FateZero" and "spatial_temp" in _target:
         test_pipeline_config["target"] = "video_diffusion.pipelines.p2p_ddim_fatezero.P2pDDIMFateZeroPipeline"
@@ -814,8 +651,6 @@ def test(
     time_string = get_time_string()
     GPU_num=torch.cuda.device_count()
     if GPU_num>1:
-        # 多卡 distributed 路径只在 accelerate 启动（RANK/WORLD_SIZE 已注入）时才合法；
-        # 裸 python 在多卡机器上误入会在 init_process_group 因缺 RANK 崩溃，给出明确指引
         if 'RANK' not in os.environ or 'WORLD_SIZE' not in os.environ:
             raise SystemExit(
                 f"[ELVE] 检测到 {GPU_num} 张 GPU，但当前是裸 python 启动（无 RANK/WORLD_SIZE），"
@@ -825,21 +660,13 @@ def test(
                 f"test_fatezero.py --config <yaml>")
         with elve_timing.timer('comm_init_group'):
             dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo')
-        # time_string 各 rank 独立计算：rank1 进 test() 前要轮询 yaml 等 rank0 的
-        # LLM 决策（可晚数秒），跨分钟边界时会得到不同的时间戳 → result 目录分裂成
-        # 两个（各 rank 只有自己的 GPU gif），末尾拼 step1.gif 时互相找不到而崩。
-        # 统一以 rank0 为准：yymmdd-HHMM 编码成 int 经 nccl 广播。
-        # 张量必须放在本 rank 的卡上（此刻 Accelerator 尚未创建、没人 set_device，
-        # 笼统的 'cuda' 会让所有 rank 都落在 cuda:0，NCCL 报 Duplicate GPU）
         _lr = int(os.environ.get('LOCAL_RANK', os.environ.get('RANK', 0)))
         _ts_enc = torch.tensor([int(time_string[:6] + time_string[7:])], dtype=torch.int64,
                                device=f'cuda:{_lr}')
-        # 首个集合通信：含 NCCL communicator 的惰性建链（first_ms 单列在计时报告里）
         with elve_timing.timer('comm_bcast_ts'):
             dist.broadcast(_ts_enc, src=0)
         _ts_v = int(_ts_enc.item())
         time_string = f"{_ts_v // 10000:06d}-{_ts_v % 10000:04d}"
-    # Control 深度图缓存目录只有 ControlNet 模式需要；FateZero 模式不再创建空目录
     Control_image_path = None
     if method == "ControlNet":
         _parts = ['Control', f"{GPU_num}GPU", control_class]
@@ -861,10 +688,6 @@ def test(
         os.makedirs(logdir, exist_ok=True)
         OmegaConf.save(args, os.path.join(logdir, "config.yml"))
         
-    # LLM 语义分析与决策已在启动部分完成（llm_decision_routing，见 run()）：
-    # model_adaption 的路由结果（是否 tune、加载哪个模型）通过
-    # pretrained_model_path / method 覆盖传入，此处不再重复调用 LLM。
-
 
 
     pipeline, unet, vae, text_encoder, tokenizer, weight_dtype, controlnet, prepare_control_image,scheduler_config = init_model(
@@ -913,10 +736,7 @@ def test(
         unet.eval()
         
         if method == "ControlNet":
-            # ControlNet: 生成深度图作为控制条件
             images=batch["images"]
-            # 帧补齐：深度图生成走网格批处理，需先补到网格整数倍；生成完裁回真实帧。
-            # 补齐的权威来源在 pipeline 内部（按同样规则再补），此处裁回即不会重复补
             n_real_d = images.shape[2]
             n_pad_d = (-n_real_d) % (grid_sizeH * grid_sizeW)
             if n_pad_d:
@@ -934,11 +754,10 @@ def test(
             depth_images=rearrange(depth_images,"(b f) c h w -> b c f h w", b=1)
             depth_images=grid.restore_frames_from_grid(depth_images,grid_sizeH,grid_sizeW)
             if n_pad_d:
-                depth_images = depth_images[:, :, :n_real_d, :, :]  # 裁掉补齐帧，恢复真实帧数
+                depth_images = depth_images[:, :, :n_real_d, :, :]
             depth_images=rearrange(depth_images,"b c f h w -> (b f) c h w")
             depth_images = depth_images.to(device=accelerator.device, dtype=weight_dtype)
         elif method == "FateZero":
-            # FateZero: 不需要深度图
             depth_images = None
         
         text_embeddings = pipeline._encode_prompt(
@@ -954,12 +773,7 @@ def test(
 
         _t_inv0 = time.time()
         if method == "FateZero":
-            # FateZero（重构版 pipeline）：按编辑消费镜像裁剪存储，支持缓存复用
             p2p_cfg = editing_config['p2p_config'][0]
-            # blend_latents 的生效前提是 SpatialBlender 会建出来（make_controller 里
-            # blend_words 缺失/为 'None' 时不建 blender、latent 不会被消费）。
-            # 全局编辑注释 blend_words 后，need 镜像若仍按 blend_latents=True 排入
-            # latent 项，ReplayProvider 预取序列会与实际消费错位而断言崩。
             _blend_words = p2p_cfg.get('blend_words', None)
             _blender_on = _blend_words is not None and _blend_words != 'None'
             editing_params = dict(
@@ -978,7 +792,6 @@ def test(
                 num_inference_steps=editing_config['num_inference_steps'],
             )
         else:
-            # ControlNet：保持原调用方式
             batch['ddim_init_latents'] = pipeline.prepare_latents_ddim_inverted(
                 rearrange(batch["images"].to(dtype=weight_dtype), "b c f h w -> (b f) c h w"),
                 batch_size=1,
@@ -988,7 +801,7 @@ def test(
                 LOW_RESOURCE=True,
                 save_path=logdir if verbose else None,
                 controlnet_conditioning_scale=controlnet_conditioning_scale,
-                control_image=depth_images,  # 传入深度图作为控制条件
+                control_image=depth_images,
                 scheduler_config=scheduler_config
             )
         print(f"[TIMING] rank={accelerator.process_index} use_time_Inversion={time.time()-_t_inv0:.4f}", flush=True)
@@ -1009,12 +822,11 @@ def test(
                 step=0,
                 latents=batch['ddim_init_latents'],
                 save_dir=logdir if verbose else None,
-                control_image=depth_images,  # 传入控制图像
+                control_image=depth_images,
             )
             print(f"[TIMING] rank={accelerator.process_index} use_time_Denoising={time.time()-_t_den0:.4f}", flush=True)
 
         if elve_timing.ENABLED:
-            # ELVE_TIMING=1：通信/换入换出分桶报告（两 rank 各打一份并落 json）
             print(elve_timing.format_report(f'rank={accelerator.process_index}'), flush=True)
             elve_timing.dump(os.path.join(logdir, f'elve_timing_rank{accelerator.process_index}.json'))
 
@@ -1022,8 +834,6 @@ def test(
         dist.barrier()
         rank = dist.get_rank()
         if rank == 0:
-            # 按实际存在的 step_0_GPU{r}.gif 合并（不写死 GPU0/GPU1，卡数自适应；
-            # 正则排除 atten 可视化文件），rank 序号排序保证帧顺序与视频一致
             per_gpu = []
             for p in glob(f"{logdir}/sample/step_0_GPU*.gif"):
                 m = re.search(r'GPU(\d+)\.gif$', p)
@@ -1056,11 +866,8 @@ def test(
                     loop=0,
                     duration=duration
                 )
-            # step1.gif 是"原视频|编辑后"网格的逐卡顺序拼接；再出一份纯编辑帧版
             _save_edited_only_gif(logdir)
     else:
-        # 单卡：logger 的 step_0_0_0_GPU0.gif 本身就是纯编辑帧，统一换名成
-        # step1_edited.gif，保证单双卡产物命名一致
         _save_edited_only_gif(logdir)
 
     accelerator.end_training()
@@ -1068,13 +875,10 @@ def test(
 @click.command()
 @click.option("--config", type=str, default="config/sample.yml")
 def run(config):
-    # 日志重定向到文件时按行刷新，保证 LLM 路由/tune 状态实时可见
-    # （否则 stdio 全缓冲会把路由打印憋到进程退出才落盘）
     try:
         sys.stdout.reconfigure(line_buffering=True)
     except Exception:
         pass
-    # 首先读取配置获取 method
     Omegadict = OmegaConf.load(config)
     method = Omegadict.get('method')
 
@@ -1082,32 +886,21 @@ def run(config):
         raise ValueError("Method parameter is required in config")
 
     # ============================================================
-    # 启动部分：pipeline 启动前先跑 LLM 语义分析（论文 Sec 3.3 决策模块）。
-    # 流式输出 + model_adaption 前置 -> 不等 Thinking 生成完即可路由：
-    #   zero-shot                 直接用预训练模型
-    #   one-shot(temporal module) 自主启动 tune，加载微调后的模型文件
-    #   one-shot(Motion module)   启动外置 MotionEditor 后直接返回
     # ============================================================
     llm_overrides = {}
-    # DeepSeek(LLM 路由)仅在 FateZero 模式下启用；
-    # method=ControlNet 时无视 Use_DeepSeek，直接走 ControlNet pipeline
     if method == "FateZero" and Omegadict.get('Use_DeepSeek', False):
         llm_overrides = llm_decision_routing(Omegadict, config)
-        if llm_overrides is None:  # 已启动 MotionEditor，不进入 ELVE pipeline
+        if llm_overrides is None:
             return
         if 'method' in llm_overrides:
-            method = llm_overrides['method']  # temporal 路由固定 FateZero 模式
+            method = llm_overrides['method']
 
-    # 使用上下文管理器运行测试
     with diffusers_context(method):
-        # 重新加载配置以确保一致性
         Omegadict = OmegaConf.load(config)
         if llm_overrides:
-            # 应用 LLM 决策出的模型配置（覆盖重载回来的 yaml 值）
             Omegadict.merge_with(OmegaConf.create(llm_overrides))
 
         if method == "MotionEditor":
-            # MotionEditor 走独立 pipeline，与 ELVE 的 fatezero/controlnet 不交叉
             run_motioneditor(Omegadict)
             return
 
@@ -1121,8 +914,6 @@ if __name__ == "__main__":
     try:
         run()
     except SystemExit as e:
-        # click standalone 模式正常收尾会自己 sys.exit(0)，异常退出也可能是 SystemExit；
-        # 捕获后统一在这里打端到端耗时，再按原退出码退出
         _code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
     _rank = os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0"))
     print(f"[TIMING] rank={_rank} use_time_EndToEnd={time.time()-_T_E2E_START:.4f}", flush=True)

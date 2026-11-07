@@ -39,7 +39,7 @@ class TuneAVideoDataset(Dataset):
         self.images = np.stack(self.images)
 
     def __len__(self):
-        return self.GPU_num  # 返回2，表示我们将数据分成两个批次
+        return self.GPU_num
 
     def __getitem__(self, index):
         # load and sample video frames

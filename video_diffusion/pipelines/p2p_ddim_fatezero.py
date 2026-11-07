@@ -1,20 +1,3 @@
-"""
-FateZero 模式（重构版）独立 pipeline。
-
-以原始 FateZero 的 P2pDDIMSpatioTemporalPipeline 为骨架重写，ELVE 网格机制下的关键设计：
-
-1. 步配对（缺陷修复）：编辑步 i 的网格分组 = 反演步 N-1-i 的分组 indicate(N-1-i)。
-   反演与编辑循环统一采用"步间 org 布局、步内按需滑动"的无状态方案：
-   每步从 org 布局出发，i 为偶数（且帧数>单网格）时滑动到 alt 分组，处理完恢复 org。
-   单卡滑动 = 帧重排；多卡 = dist send/recv 交换边缘帧（跨卡滑动）。
-2. 帧补齐：帧数非 grid_sizeH*grid_sizeW 整数倍时复制末帧补齐，VAE 解码前裁掉补齐帧。
-3. 分级存储：反演特征按 (step, grid) 分片。单卡帧数 ≤ memory_frames 全驻留 GPU；
-   超过则即时落盘，编辑期由 ReplayProvider 后台线程按消费顺序异步预取。
-4. 缓存复用：yaml 参数 All_Inversion=True 时强制重反演；否则 manifest 校验通过则复用
-   （编辑 prompt 不影响反演，缓存键 = 源视频 + 源 prompt + 步数 + 帧数 + 网格规格）。
-5. temporal attention 不接管（对齐原版 FateZero：register 跳过 attn_temporal，
-   zero-shot 下零初始化恒等；one-shot tune 后自由前向）。
-"""
 
 from typing import Callable, List, Optional, Union
 import os
@@ -55,15 +38,15 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         controlnet=None,
         method: str = "FateZero",
         control_class: str = None,
-        disk_store: bool = False,          # 兼容旧参数：分级存储改由 memory_frames 决定
+        disk_store: bool = False,
         video_length: int = 8,
         grid_sizeH: int = 2,
         grid_sizeW: int = 2,
         accelerator=None,
         data_path: str = "",
         num_inference_steps: int = 0,
-        memory_frames: int = 16,           # 单卡口径：≤该帧数特征驻留 GPU，超过落盘
-        All_Inversion: bool = False,       # True=强制重新反演，忽略缓存
+        memory_frames: int = 16,
+        All_Inversion: bool = False,
         **kwargs,
     ):
         super().__init__(vae, text_encoder, tokenizer, unet, scheduler)
@@ -79,11 +62,8 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         self.num_inference_steps = num_inference_steps
         self.empty_controller = EmptyControl()
 
-        # alt 滑动分组的开关必须按全局帧数判断：若按每卡帧数，"每卡帧数恰好等于
-        # 网格大小"的配置（如 8f 双卡、grid 2×2 → 每卡 4 帧）会被关掉混帧，
-        # 而同配置单卡是开的 → 单双卡编辑结果不一致（帧 3/4 之间永远无 attention 交流）
         self._video_length_total = video_length
-        self.video_length = video_length // torch.cuda.device_count()  # 每卡帧数（真实，未补齐）
+        self.video_length = video_length // torch.cuda.device_count()
         GPU_num = torch.cuda.device_count()
         base = os.path.basename(data_path.rstrip('/')) if data_path else 'unknown'
         if GPU_num > 1:
@@ -92,15 +72,13 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         else:
             self.store_dir = os.path.join('Attentions', f'{GPU_num}GPU', base, str(self.video_length))
 
-        # 反演产物（供编辑期 ReplayProvider 使用）
         self._inv_store = None
         self._need = None
         self._num_grids = 0
         self._num_inv_steps = 0
-        self._n_real = None  # 补齐前帧数；解码前按此裁掉补齐帧
+        self._n_real = None
 
     # ------------------------------------------------------------------
-    # 网格滑动（单卡重排 / 多卡帧交换），flag=0: org→alt，flag=1: alt→org
     # ------------------------------------------------------------------
 
     def alternate(self, latents, flag):
@@ -124,7 +102,6 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         device = self.accelerator.device
 
         if flag % 2 == 0:
-            # 偶：交换头部 gH 帧（org → 滑动后分组）
             sqc = alt
             indicate = org if rank == 0 else alt
             latents = grid.restore_frames_from_grid(latents, self.grid_sizeH, self.grid_sizeW)
@@ -144,7 +121,6 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
             latents = torch.cat([latents, data1], dim=2).to(device)
             latents = grid.combine_frames_in_grid(latents, self.grid_sizeH, self.grid_sizeW)
         else:
-            # 奇：交换尾部 gH 帧（滑动分组 → org）
             indicate = org
             sqc = torch.argsort(torch.tensor(alt))
             latents = grid.restore_frames_from_grid(latents, self.grid_sizeH, self.grid_sizeW)
@@ -168,15 +144,10 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         return latents, indicate
 
     def _want_alt(self, step: int) -> bool:
-        """反演步 step 的分组是否为滑动分组（indicate(step)，偶数步滑动）。
-
-        按全局帧数判断（见 __init__ 注释）：双卡每卡帧数==网格大小时也要开，
-        由 alternate_multiGPU 跨卡交换帧来复刻单卡的滑动分组。"""
         return (self._video_length_total > self.grid_sizeH * self.grid_sizeW) and (step % 2 == 0)
 
     def _group_shuffle(self, latents, flag):
         if torch.cuda.device_count() > 1:
-            # comm_exchange_total 含张量切片/cat 等准备开销，网络环节见 comm_send/recv/barrier
             with timer('comm_exchange_total'):
                 return self.alternate_multiGPU(latents, flag)
         return self.alternate(latents, flag)
@@ -192,7 +163,6 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         return result
 
     # ------------------------------------------------------------------
-    # VAE 编解码（逐网格）
     # ------------------------------------------------------------------
 
     def encode_in_f_batches(self, image_grid, model):
@@ -211,19 +181,12 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         return torch.cat(decoded_batches, dim=2)
 
     # ------------------------------------------------------------------
-    # 反演
     # ------------------------------------------------------------------
 
     @torch.no_grad()
     def prepare_latents_ddim_inverted(self, image, text_embeddings, scheduler_config,
                                       editing_params: dict, num_inference_steps: int,
                                       generator=None, LOW_RESOURCE: bool = True):
-        """DDIM 反演：按 need 分片存储 attention / latent，返回最终噪声 latent。
-
-        editing_params: 反演裁剪所需的最小编辑参数集
-        {source_prompt, prompt, cross_replace_steps, self_replace_steps, blend_latents,
-         latent_replace_steps(可选, 默认 (0.2, 0.8))}
-        """
         self.prepare_before_train_loop()
         self.scheduler_config = scheduler_config
         self.inverse_scheduler = DDIMScheduler.from_config(self.scheduler_config)
@@ -231,7 +194,6 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         self.timesteps = list(reversed(self.inverse_scheduler.timesteps))
         self.num_inference_steps = num_inference_steps
 
-        # ---- 帧补齐：复制末帧到 grid_sizeH*grid_sizeW 的整数倍 ----
         image = rearrange(image, "(b f) c h w -> b c f h w", b=1)
         n_real = image.shape[2]
         gA = self.grid_sizeH * self.grid_sizeW
@@ -249,7 +211,6 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         init_latents = 0.18215 * init_latents
         init_latents_bcfhw = rearrange(init_latents, "(b f) c h w -> b c f h w", b=1)
 
-        # ---- 编辑消费镜像：需要存储的反演步集合 ----
         prompts = [editing_params['source_prompt'], editing_params['prompt']]
         latent_replace_steps = editing_params.get('latent_replace_steps', (0.2, 0.8))
         if isinstance(latent_replace_steps, (int, float)):
@@ -261,7 +222,6 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
                                   editing_params.get('blend_latents', False),
                                   self.tokenizer,
                                   latent_replace_steps=latent_replace_steps)
-        # meta 含 blend 窗口：改窗口即换缓存；alt 滑动分组影响分片帧构成，一并入 meta
         meta = dict(source_prompt=prompts[0], num_steps=num_inference_steps,
                     num_grids=num_grids, video_length=n_real,
                     gridH=self.grid_sizeH, gridW=self.grid_sizeW,
@@ -293,7 +253,6 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         return store.init_latent
 
     def process_with_unet(self, unet, latent_model_input, t, text_embeddings, b_indices, store):
-        """逐网格调用 UNet；store 记录本网格产生的 attention 分片。"""
         noise_preds = []
         for j, latent_grid in enumerate(latent_model_input.split(1, dim=2)):
             store.begin_grid()
@@ -305,10 +264,6 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
 
     @torch.no_grad()
     def ddim_clean2noisy_loop(self, latent, text_embeddings, store: InversionStore):
-        """clean → noisy 反演。步间保持 org 布局；偶数步滑到 alt 分组再恢复。
-
-        attention 在滑动分组（indicate(i)）下计算；latent 步后以 org 布局存储。
-        """
         weight_dtype = latent.dtype
         _, cond_embeddings = text_embeddings.chunk(2)
         latent = latent.clone().detach()
@@ -329,13 +284,12 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
 
             if want_alt:
                 latent, _ = self._group_shuffle(latent, 1)
-            latent = store.step_callback(latent, i)  # org 布局的步后 latent
+            latent = store.step_callback(latent, i)
             latent = latent.to(weight_dtype)
             torch.cuda.empty_cache()
         return latent
 
     def next_clean2noise_step(self, model_output, timestep, sample):
-        """DDIM eta=0 的 clean→noisy 一步。"""
         scheduler = self.inverse_scheduler
         timestep, next_timestep = min(
             timestep - scheduler.config.num_train_timesteps // scheduler.num_inference_steps, 999), timestep
@@ -347,7 +301,6 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         return alpha_prod_t_next ** 0.5 * next_original_sample + next_sample_direction
 
     # ------------------------------------------------------------------
-    # 编辑
     # ------------------------------------------------------------------
 
     @torch.no_grad()
@@ -367,7 +320,6 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
                                     save_path=save_path, **p2p_config)
 
     def _build_replay_provider(self, device, dtype=torch.float16):
-        """编辑期数据源：GPU 驻留分片或磁盘分片（后台线程预取）。"""
         store = self._inv_store
         if store is not None and store.keep_on_gpu:
             load_shard = lambda s, j: store.shards.get((s, j))
@@ -388,11 +340,9 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
         equal_length = len(source_prompt.split()) == len(prompt.split())
         is_replace_controller = cfg.get('is_replace_controller', True) and equal_length
 
-        # 掩码阈值：blend_self_th / blend_latents_th 各自独立，旧配置的 blend_th 作为共用兼容别名
         blend_th_legacy = cfg.get('blend_th', None)
         blend_self_th = cfg.get('blend_self_th', blend_th_legacy if blend_th_legacy is not None else (0.3, 0.3))
         blend_latents_th = cfg.get('blend_latents_th', blend_th_legacy if blend_th_legacy is not None else (0.3, 0.3))
-        # latent blend 窗口（与反演期 editing_params 同源；缺省回落到反演期归一化的值）
         latent_replace_steps = cfg.get('latent_replace_steps',
                                        getattr(self, '_latent_replace_steps', (0.2, 0.8)))
 
@@ -450,7 +400,6 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(tqdm(timesteps, desc='reverse_diffusion')):
-                # 配对：编辑步 i 使用反演步 N-1-i 的网格分组
                 want_alt = self._want_alt(num_inference_steps - 1 - i)
                 if want_alt:
                     latents, indices = self._group_shuffle(latents, 0)
@@ -479,14 +428,13 @@ class P2pDDIMFateZeroPipeline(SpatiotempStableDiffusionPipeline):
                 latents = torch.cat(latents_b, dim=2)
 
                 if want_alt:
-                    latents, _ = self._group_shuffle(latents, 1)  # 恢复 org 布局
+                    latents, _ = self._group_shuffle(latents, 1)
                 latents = controller.step_callback(latents).to(device=device, dtype=latents_dtype)
 
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
                 torch.cuda.empty_cache()
 
-        # ---- 解码（先裁掉补齐帧）----
         latents = self.decode_in_f_batches(latents)
         image = grid.restore_frames_from_grid(latents, self.grid_sizeH, self.grid_sizeW)
         if self._n_real is not None and self._n_real < image.shape[2]:

@@ -188,8 +188,6 @@ class SpatiotempTransformerBlock(nn.Module):
                 f"`temp_attention_position` must be one of {temp_attention_positions}"
             )
 
-        # 1. Spatial-Attn（网格内全自注意力：同网格各帧 token 拼为单图，标准 self-attention
-        # 天然覆盖帧间交互，不再使用 Tune-A-Video 式稀疏因果 gather）
         self.attn1 = CrossAttention(
             query_dim=dim,
             heads=num_attention_heads,
@@ -294,11 +292,9 @@ class SpatiotempTransformerBlock(nn.Module):
             kwargs.update(encoder_hidden_states=encoder_hidden_states)
         hidden_states = hidden_states + self.attn1(**kwargs)
 
-        # 拆网格   
         hidden_states = hidden_states.reshape(batch_bf, height_g, weight_g, channel).permute(0, 3, 1, 2).contiguous()
         hidden_states = rearrange(hidden_states, "(b f) c h w -> b c f h w", f=clip_length) 
         hidden_states = grid.restore_frames_from_grid(hidden_states,grid_sizeH,grid_sizeW)
-        #恢复帧序列顺序
         if indices !=[]:
             inverse_indices = torch.argsort(torch.tensor(indices))
             hidden_states = hidden_states[:, :, inverse_indices, :, :]
@@ -313,7 +309,6 @@ class SpatiotempTransformerBlock(nn.Module):
             hidden_states = self.apply_temp_attention(hidden_states, timestep, clip_length,grid_sizeH=grid_sizeH,grid_sizeW=grid_sizeW,indices=indices)
 
         if self.attn2 is not None:
-            # 2. Cross-Attention（逐帧；controller 由 fatezero_register 以实例补丁接入）
             norm_hidden_states = (
                 self.norm2(hidden_states, timestep)
                 if self.use_ada_layer_norm
@@ -335,7 +330,6 @@ class SpatiotempTransformerBlock(nn.Module):
         if clip_length is not None and self.temp_attention_position == "after_feedforward":
             hidden_states = self.apply_temp_attention(hidden_states, timestep, clip_length,grid_sizeH=grid_sizeH,grid_sizeW=grid_sizeW,indices=indices)
         
-        #合网格
         new_batch=batch_bf*grid_sizeH*grid_sizeW
         new_height=int(height_g/grid_sizeH)
         new_weight=int(weight_g/grid_sizeW)
@@ -351,9 +345,6 @@ class SpatiotempTransformerBlock(nn.Module):
         return hidden_states
 
     def apply_temp_attention(self, hidden_states, timestep, clip_length,grid_sizeH=2,grid_sizeW=2,indices=[]):
-        # temporal attention 按帧处理（网格数据的"时间维"与帧序列不同，先拆回帧）。
-        # 零初始化（to_out 全零）时 attn_temp 为恒等映射，直接跳过省计算；
-        # one-shot tune 载入非零权重后自动恢复真实前向（此路径不做任何重放）。
         if not self.attn_temp.to_out[0].weight.data.any():
             return hidden_states
         d = hidden_states.shape[1]
@@ -366,7 +357,5 @@ class SpatiotempTransformerBlock(nn.Module):
         hidden_states = self.attn_temp(norm_hidden_states) + hidden_states
         hidden_states = rearrange(hidden_states, "(b d) f c -> (b f) d c", d=d)
         return hidden_states
-
-
 
 

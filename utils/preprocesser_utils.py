@@ -12,8 +12,6 @@ from annotator.pidinet import apply_pidinet, unload_pid_model
 from annotator.leres import apply_leres, unload_leres_model
 from annotator.midas import apply_midas, unload_midas_model
 
-# 模块级单例：这些 detector 构建时要读大权重文件并上 GPU（zoe 达 1.4GB），
-# 每帧新建实例会导致逐帧重复"读盘+建模型+搬 GPU"，视频帧数越多浪费越大
 _lineart_detector = None
 _lineart_coarse_detector = None
 _lineart_anime_detector = None
@@ -78,7 +76,6 @@ def resize_image_with_pad(input_image, resolution, skip_hwc3=False):
     return safer_memory(img_padded), remove_pad
 
 
-
 def lineart_standard(img, res=512, **kwargs):
     img, remove_pad = resize_image_with_pad(img, res)
     x = img.astype(np.float32)
@@ -140,7 +137,6 @@ def canny(img, res=512, thr_a=100, thr_b=200, **kwargs):
     return remove_pad(result), True
 
 
-
 def hed(img, res=512, **kwargs):
     img, remove_pad = resize_image_with_pad(img, res)
     model_hed = apply_hed
@@ -195,7 +191,6 @@ def pidinet_safe(img, res=512, **kwargs):
     return remove_pad(result), True
 
 
-
 def zoe_depth(img, res=512, **kwargs):
     global _zoe_detector
     img, remove_pad = resize_image_with_pad(img, res)
@@ -206,8 +201,6 @@ def zoe_depth(img, res=512, **kwargs):
 
 
 def unload_preprocess_models():
-    """预处理全部完成后调用：把已加载的 annotator 移回 CPU 释放显存，给后续
-    ControlNet 生成腾空间；实例保留在内存，再需要推理时 __call__ 会自动回 GPU。"""
     for detector in (_lineart_detector, _lineart_coarse_detector,
                      _lineart_anime_detector, _manga_line_detector, _zoe_detector):
         if detector is not None:

@@ -98,14 +98,11 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
         grid_sizeW=2,
         indices=[]
     ):
-        # 输入验证
         assert hidden_states.dim() == 5, f"Expected hidden_states to have ndim=5, but got ndim={hidden_states.dim()}."
         
-        # 获取视频长度并重组张量
         video_length = hidden_states.shape[2]
         hidden_states = rearrange(hidden_states, "b c f h w -> (b f) c h w")
         
-        # 如果需要，扩展encoder_hidden_states以匹配时间维度
         if encoder_hidden_states is not None:
             encoder_hidden_states = repeat(
                 encoder_hidden_states, 
@@ -113,11 +110,9 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
                 f=video_length * grid_sizeH * grid_sizeW
             )
         
-        # 保存残差连接
         batch, channel, height, width = hidden_states.shape
         residual = hidden_states
         
-        # 归一化和投影
         hidden_states = self.norm(hidden_states)
         if not self.use_linear_projection:
             hidden_states = self.proj_in(hidden_states)
@@ -128,7 +123,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
             hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * width, inner_dim)
             hidden_states = self.proj_in(hidden_states)
         
-        # 通过所有transformer块
         for block in self.transformer_blocks:
             hidden_states = block(
                 hidden_states,
@@ -144,7 +138,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
                 indices=indices
             )
         
-        # 输出处理
         if not self.use_linear_projection:
             hidden_states = (
                 hidden_states.reshape(batch, height, width, inner_dim)
@@ -160,24 +153,14 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
                 .contiguous()
             )
         
-        # 残差连接
         output = hidden_states + residual
         
-        # 重组回原始形状
         output = rearrange(output, "(b f) c h w -> b c f h w", f=video_length)
         
-        # 根据return_dict决定返回格式
         if not return_dict:
             return (output,)
         
         return Transformer3DModelOutput(sample=output)
-
-
-
-
-
-
-
 
 
 class BasicTransformerBlock(nn.Module):
@@ -275,7 +258,6 @@ class BasicTransformerBlock(nn.Module):
 
     def forward(self, hidden_states, encoder_hidden_states=None, timestep=None, attention_mask=None, video_length=None,batch_bf=None,channel=None,height_g=None,weight_g=None,grid_sizeH=2,grid_sizeW=2,indices=[]):
         #print("indices",indices)
-        # Self-Attention（网格内全自注意力）
         #print("_______________latents.shape=",hidden_states.shape)
         norm_hidden_states = (
             self.norm1(hidden_states, timestep) if self.use_ada_layer_norm else self.norm1(hidden_states)
@@ -291,7 +273,6 @@ class BasicTransformerBlock(nn.Module):
         
         
         
-        # 拆网格   
         #print("0",hidden_states.shape)
         #print("hidden_states999.shape=",hidden_states.shape)
         hidden_states = hidden_states.reshape(batch_bf, height_g, weight_g, channel).permute(0, 3, 1, 2).contiguous()
@@ -316,7 +297,6 @@ class BasicTransformerBlock(nn.Module):
         new_weight=int(weight_g/grid_sizeW)
         hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(new_batch, new_height*new_weight, channel)
         #print("5",hidden_states.shape)  
-
 
 
         if self.attn2 is not None:
@@ -352,7 +332,6 @@ class BasicTransformerBlock(nn.Module):
         hidden_states = self.attn_temp(norm_hidden_states) + hidden_states
         hidden_states = rearrange(hidden_states, "(b d) f c -> (b f) d c", d=d)
         
-        #合网格
         new_batch=batch_bf*grid_sizeH*grid_sizeW
         new_height=int(height_g/grid_sizeH)
         new_weight=int(weight_g/grid_sizeW)

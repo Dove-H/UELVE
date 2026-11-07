@@ -4,7 +4,7 @@ pretrained_model_path: /mnt/fspace/hproject/model/stable-diffusion-v1-5
 method: "FateZero"  #FateZero,ControlNet
 control_class: "depth_zoe"
 Use_DeepSeek: True
-tune-yaml: config/tune/wolf-tune.yaml  # DeepSeek temporal 路由时自主启动的 tune 配置（不填则按数据集路径自动匹配）
+tune-yaml: config/tune/wolf-tune.yaml
 dataset_config:
     path: "data/wolf8f"
     prompt: "a wolf" # RENAME Inversion editing_prompts
@@ -28,20 +28,20 @@ editing_config:
     ]
     p2p_config:
         0:
-            cross_replace_steps: #什么时候开始替换cross attention
+            cross_replace_steps:
                 default_: 0.6
-            self_replace_steps: 0.6 #什么时候开始替换self attention
-            latent_replace_steps: [0.2, 0.8] # latent blend 时间窗口（比例×总步数）
+            self_replace_steps: 0.6
+            latent_replace_steps: [0.2, 0.8]
             use_inversion_attention: True 
-            is_replace_controller: True #True时用attentionreplace，prompt相同字数替换，False时用attentionrefine
+            is_replace_controller: True
             eq_params:  
                   words: ["watercolor"]
                   values: [3]  
             blend_words: [['wolf',]]
             blend_latents: True
-            blend_latents_th: [0.4, 0.4]   # latent blend 掩码二值化阈值
-            blend_self_attention: True    # 形状改变类编辑时开 True
-            blend_self_th: [0.4, 0.4]      # self-attention 掩码二值化阈值
+            blend_latents_th: [0.4, 0.4]
+            blend_self_attention: True
+            blend_self_th: [0.4, 0.4]
 
 
 
@@ -56,6 +56,6 @@ editing_config:
 model_config:
     lora: 160
 test_pipeline_config:
-    target: video_diffusion.pipelines.p2p_ddim_spatial_temp.P2pDDIMSpatiotempPipeline  # target 会随 method 自动校正（test_fatezero.py 启动时），切模式只改上面 method 一行即可
+    target: video_diffusion.pipelines.p2p_ddim_spatial_temp.P2pDDIMSpatiotempPipeline
 seed: 0
 

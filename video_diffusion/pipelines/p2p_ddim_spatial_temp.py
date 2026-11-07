@@ -1,8 +1,3 @@
-"""ControlNet 模式 pipeline（FateZero 已拆分至 p2p_ddim_fatezero.py）。
-
-网格机制下的 ControlNet img2img 编辑：反演 + 逐网格 UNet 缝合 controlnet 残差。
-网格滑动（alternate / alternate_multiGPU）保留用于 latents / control_image 的分组一致性。
-"""
 
 from typing import Callable, List, Optional, Union
 import os
@@ -40,7 +35,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         controlnet,
         method: str = "ControlNet",
         control_class: str = None,
-        disk_store: bool = False,  # 兼容旧调用签名
+        disk_store: bool = False,
         video_length: int = 8,
         grid_sizeH: int = 2,
         grid_sizeW: int = 2,
@@ -61,7 +56,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         self.video_length = video_length // torch.cuda.device_count()
 
     def encode_in_f_batches(self, image_grid, model):
-        batches = torch.split(image_grid, 1, dim=0)  # 分批
+        batches = torch.split(image_grid, 1, dim=0)
         encoded_batches = []
         for batch in batches:
             latent_dist = model(batch).latent_dist.sample()
@@ -92,7 +87,6 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
         image = rearrange(image, "(b f) c h w -> b c f h w", b=1)  # [1,3,8,512,512]
-        # ---- 帧补齐：与 FateZero pipeline 一致——复制末帧到 grid_sizeH*grid_sizeW 整数倍 ----
         n_real = image.shape[2]
         gA = self.grid_sizeH * self.grid_sizeW
         n_pad = (-n_real) % gA
@@ -108,7 +102,6 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         init_latents = torch.cat([init_latents], dim=0)
         init_latents_bcfhw = rearrange(init_latents, "(b f) c h w -> b c f h w", b=batch_size)
 
-        # control_image 需要匹配网格的数据格式（按自身帧数幂等补齐：原始帧/已补齐帧都能正确处理）
         control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=batch_size)
         _n_pad_ctrl = (-control_image.shape[2]) % gA
         if _n_pad_ctrl:
@@ -123,7 +116,6 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
 
     def process_with_unet(self, unet, latent_model_input, t, text_embeddings,
                           control_image, controlnet_conditioning_scale):
-        """逐网格 UNet 调用，controlnet 残差缝合。"""
         latent_grids = latent_model_input.split(1, dim=2)
         noise_preds = []
         for i, latent_grid in enumerate(latent_grids):
@@ -210,7 +202,6 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         device = self.accelerator.device
 
         if flag % 2 == 0:
-            # 偶数步：交换头部 gH 帧
             sqc = alt
             indicate = org if rank == 0 else alt
             latents = grid.restore_frames_from_grid(latents, self.grid_sizeH, self.grid_sizeW)
@@ -227,7 +218,6 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
             latents = torch.cat([latents, data1], dim=2).to(device)
             latents = grid.combine_frames_in_grid(latents, self.grid_sizeH, self.grid_sizeW)
         else:
-            # 奇数步：交换尾部 gH 帧
             indicate = org
             sqc = torch.argsort(torch.tensor(alt))
             latents = grid.restore_frames_from_grid(latents, self.grid_sizeH, self.grid_sizeW)
@@ -308,7 +298,6 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
 
         control_image = rearrange(control_image, "(b f) c h w -> b c f h w", b=2)
-        # 帧补齐：编辑阶段的 control_image 同样补到网格整数倍（已补齐则 n_pad 为 0，不会重复补）
         _n_pad_c = (-control_image.shape[2]) % (self.grid_sizeH * self.grid_sizeW)
         if _n_pad_c:
             print(f'[ControlNet] 编辑阶段 control_image 帧数 {control_image.shape[2]} 补齐到 '
@@ -373,7 +362,6 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
 
         latents = self.decode_in_f_batches(latents)
         image = grid.restore_frames_from_grid(latents, self.grid_sizeH, self.grid_sizeW)
-        # 裁掉补齐帧（与 FateZero 一致），输出只保留真实帧
         if getattr(self, '_n_real', None) is not None and image.shape[2] > self._n_real:
             image = image[:, :, :self._n_real, :, :]
         image = rearrange(image, "b c f h w -> b f h w c")
@@ -389,7 +377,7 @@ class P2pDDIMSpatiotempPipeline(SpatiotempStableDiffusionPipeline):
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
 
     def decode_in_f_batches(self, image_grid):
-        batches = torch.split(image_grid, 1, dim=2)  # 分批
+        batches = torch.split(image_grid, 1, dim=2)
         decoded_batches = []
         for batch in batches:
             decoded_batches.append(self.decode_latents(batch, self.grid_sizeH, self.grid_sizeW))
